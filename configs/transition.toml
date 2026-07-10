@@ -1,0 +1,35 @@
+[grid]
+nx = 48
+ny = 48
+length = 1.0
+radius = 0.4
+
+[model]
+mobility = 0.2
+barrier = 1.0
+kappa = 0.0015
+reaction_rate = 0.25
+stage2 = 0.5
+stage1 = 1.0
+
+[protocol]
+# The discrete 48x48 mask has area 0.5034722222. At this current, each
+# 2.5-time-unit driven segment changes the mean filling by exactly 0.5.
+currents = [0.10069444444444445, 0.0, -0.10069444444444445, 0.0]
+durations = [2.5, 0.4, 2.5, 0.4]
+frames_per_segment = 40
+
+[solver]
+# Sixteen-case parameter-space validation requires this step size. Larger steps
+# passed smaller smokes but failed during rapid spinodal growth at sampled edges.
+dt = 0.000125
+cg_tolerance = 1e-8
+cg_max_iterations = 200
+perturbation_amplitude = 1e-4
+seed = 7
+
+[inversion]
+starts = 3
+max_iterations = 80
+mass_penalty = 1.0
+bound_penalty = 1e-8
