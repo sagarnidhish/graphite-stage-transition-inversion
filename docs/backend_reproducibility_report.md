@@ -50,9 +50,9 @@ limit and are not recovery evidence.
 
 The same cached source took 2,994.72 seconds on Modal A100-SXM4-80GB. The A100
 run completed both task artifacts, but it was 1.68 times slower than the cached
-P100 repeat. Modal reported approximately $2.16 of gross resource cost across
-the connectivity, image-build, device, CPU, and memory probes before account
-credits.
+P100 repeat. After the forward-only reproducibility diagnostic, Modal reported
+approximately $2.30 of gross resource cost across the connectivity, image-build,
+device, CPU, and memory probes before account credits.
 
 ## Interpretation
 

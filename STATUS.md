@@ -42,7 +42,8 @@ gate. See `docs/backend_reproducibility_report.md`.
   repeat completed in `1787.24` seconds (`29.8` minutes), a `30.5%` speedup.
 - Modal A100-SXM4-80GB completed the same cached two-task probe in `2994.72`
   seconds (`49.9` minutes), `1.68x` slower than the cached P100 repeat. Modal
-  reported approximately `$2.16` gross resource cost before account credits.
+  reported approximately `$2.30` gross resource cost before account credits,
+  including the later forward-only reproducibility diagnostic.
 - Exact-central forward losses failed backend agreement. For development cases
   `case_17909d05ebd0` and `case_3abdd11a7d1c`, CPU JAX 0.10.2 returned
   `0.22535` and `0.04726`; P100 JAX 0.7.2 returned `0.23658` and `0.11347`;
