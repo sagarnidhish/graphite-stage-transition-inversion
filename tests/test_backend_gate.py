@@ -1,11 +1,13 @@
 import json
 
+import numpy as np
 import pytest
 
 from graphite_stage_transition.backend_gate import (
     BackendGateThresholds,
     BackendProbe,
     ProbeCase,
+    analytic_reference_movie,
     compare_backend_probes,
     load_backend_gate_result,
     load_backend_gate_thresholds,
@@ -14,6 +16,32 @@ from graphite_stage_transition.backend_gate import (
     save_backend_gate_result,
     save_backend_probe,
 )
+
+
+def test_analytic_reference_movie_is_charge_consistent_and_bounded():
+    size = 12
+    coordinates = (np.arange(size) + 0.5) / size - 0.5
+    x, y = np.meshgrid(coordinates, coordinates, indexing="ij")
+    mask = x**2 + y**2 <= 0.4**2
+    currents = np.asarray([0.01, 0.01, -0.01, -0.01])
+    save_indices = np.asarray([0, 2, 4], dtype=np.int32)
+
+    movie = analytic_reference_movie(
+        x=x,
+        y=y,
+        mask=mask,
+        currents=currents,
+        save_indices=save_indices,
+        dt=0.1,
+        cell_area=(1.0 / size) ** 2,
+        stage2=0.5,
+        stage1=1.0,
+    )
+
+    expected_mean = 0.5 + np.asarray([0.0, 0.002, 0.0]) / (mask.sum() / size**2)
+    np.testing.assert_allclose(movie[:, mask].mean(axis=1), expected_mean, atol=1e-14)
+    assert movie[:, mask].min() >= 0.5
+    assert movie[:, mask].max() <= 1.0
 
 
 THRESHOLDS = BackendGateThresholds(

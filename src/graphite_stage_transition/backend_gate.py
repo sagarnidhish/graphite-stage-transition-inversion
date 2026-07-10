@@ -43,6 +43,62 @@ class BackendGateThresholds:
 DEFAULT_THRESHOLDS = BackendGateThresholds()
 
 
+def analytic_reference_movie(
+    *,
+    x,
+    y,
+    mask,
+    currents,
+    save_indices,
+    dt: float,
+    cell_area: float,
+    stage2: float,
+    stage1: float,
+) -> np.ndarray:
+    """Construct a backend-independent, charge-consistent morphology target."""
+
+    x_values = np.asarray(x, dtype=np.float64)
+    y_values = np.asarray(y, dtype=np.float64)
+    active = np.asarray(mask, dtype=bool)
+    current_values = np.asarray(currents, dtype=np.float64)
+    saves = np.asarray(save_indices, dtype=np.int64)
+    if (
+        x_values.shape != active.shape
+        or y_values.shape != active.shape
+        or current_values.ndim != 1
+        or saves.ndim != 1
+        or saves.size < 2
+        or saves[0] != 0
+        or saves[-1] != current_values.size
+        or np.any(np.diff(saves) <= 0)
+        or dt <= 0.0
+        or cell_area <= 0.0
+        or not stage2 < stage1
+        or not np.any(active)
+    ):
+        raise ValueError("invalid analytic reference inputs")
+    cumulative_charge = np.concatenate(
+        ([0.0], np.cumsum(current_values * float(dt)))
+    )[saves]
+    particle_area = float(np.sum(active)) * float(cell_area)
+    filling_mean = cumulative_charge / (particle_area * (stage1 - stage2))
+    if np.any(filling_mean < -1e-12) or np.any(filling_mean > 1.0 + 1e-12):
+        raise ValueError("analytic reference charge leaves the stage interval")
+
+    length = max(float(np.ptp(x_values)), float(np.ptp(y_values)))
+    mode = np.cos(2.0 * np.pi * x_values / length) * np.cos(
+        2.0 * np.pi * y_values / length
+    )
+    mode = np.where(active, mode - np.mean(mode[active]), 0.0)
+    mode_scale = float(np.max(np.abs(mode[active])))
+    if mode_scale > 0.0:
+        mode = mode / mode_scale
+    amplitude = 0.05 * np.sin(np.pi * filling_mean)
+    filling = filling_mean[:, None, None] + amplitude[:, None, None] * mode[None, ...]
+    concentration = stage2 + (stage1 - stage2) * filling
+    return np.where(active[None, ...], concentration, 0.0)
+
+
 def _freeze_array(value: Any) -> tuple[Any, ...]:
     array = np.asarray(value, dtype=np.float64)
     if array.size == 0:
@@ -369,6 +425,7 @@ def require_matching_passed_gate(
 
 
 __all__ = [
+    "analytic_reference_movie",
     "BackendGateResult",
     "BackendGateThresholds",
     "BackendProbe",

@@ -18,7 +18,12 @@ jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 import numpy as np
 
-from graphite_stage_transition.backend_gate import BackendProbe, ProbeCase, save_backend_probe
+from graphite_stage_transition.backend_gate import (
+    BackendProbe,
+    ProbeCase,
+    analytic_reference_movie,
+    save_backend_probe,
+)
 from graphite_stage_transition.config import load_config
 from graphite_stage_transition.geometry import make_circle_grid
 from graphite_stage_transition.inversion import ParameterTransform
@@ -81,17 +86,38 @@ def _development_cases(manifest: dict, maximum: int) -> list[dict]:
     return selected
 
 
-def _probe_case(manifest_path: Path, manifest: dict, config, record: dict):
-    archive_path = manifest_path.parent / record["observation_path"]
-    with np.load(archive_path) as archive:
-        observations = jnp.asarray(archive["concentration"], dtype=jnp.float64)
-        observation_times = np.asarray(archive["times"], dtype=np.float64)
-
+def _probe_case(
+    manifest_path: Path,
+    manifest: dict,
+    config,
+    record: dict,
+    analytic_targets: bool,
+):
     grid = make_circle_grid(config.grid)
     protocol = build_protocol(config.protocol, config.solver.dt)
-    saved_times = np.asarray(protocol.times[protocol.save_indices], dtype=np.float64)
-    if not np.array_equal(saved_times, observation_times):
-        raise ValueError(f"{record['case_id']}: observation times do not match protocol")
+    if analytic_targets:
+        observations = jnp.asarray(
+            analytic_reference_movie(
+                x=grid.x,
+                y=grid.y,
+                mask=grid.mask,
+                currents=protocol.current,
+                save_indices=protocol.save_indices,
+                dt=protocol.dt,
+                cell_area=grid.cell_area,
+                stage2=config.model.stage2,
+                stage1=config.model.stage1,
+            ),
+            dtype=jnp.float64,
+        )
+    else:
+        archive_path = manifest_path.parent / record["observation_path"]
+        with np.load(archive_path) as archive:
+            observations = jnp.asarray(archive["concentration"], dtype=jnp.float64)
+            observation_times = np.asarray(archive["times"], dtype=np.float64)
+        saved_times = np.asarray(protocol.times[protocol.save_indices], dtype=np.float64)
+        if not np.array_equal(saved_times, observation_times):
+            raise ValueError(f"{record['case_id']}: observation times do not match protocol")
 
     bounds = manifest["metadata"]["bounds"]
     transform = ParameterTransform(
@@ -100,8 +126,9 @@ def _probe_case(manifest_path: Path, manifest: dict, config, record: dict):
         stage2=config.model.stage2,
         stage1=config.model.stage1,
     )
+    parameter_values = record.get("parameters", {})
     evaluation_parameters = CHRParameters(
-        *(getattr(config.model, name) for name in PARAMETER_NAMES),
+        *(parameter_values.get(name, getattr(config.model, name)) for name in PARAMETER_NAMES),
         config.model.stage2,
         config.model.stage1,
     )
@@ -175,6 +202,7 @@ def main() -> None:
     parser.add_argument("--fingerprint", type=Path, required=True)
     parser.add_argument("--backend-name", required=True)
     parser.add_argument("--max-cases", type=int, default=2)
+    parser.add_argument("--analytic-targets", action="store_true")
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
     if args.max_cases < 1:
@@ -187,7 +215,13 @@ def main() -> None:
     cases = []
     runtimes = {}
     for record in records:
-        case, runtime = _probe_case(manifest_path, manifest, config, record)
+        case, runtime = _probe_case(
+            manifest_path,
+            manifest,
+            config,
+            record,
+            args.analytic_targets,
+        )
         cases.append(case)
         runtimes[case.case_id] = runtime
         print(f"{case.case_id}: {runtime:.3f} s", flush=True)
@@ -205,7 +239,8 @@ def main() -> None:
             "jax_default_backend": jax.default_backend(),
             "devices": devices,
             "runtime_seconds": runtimes,
-            "parameter_point": "canonical_config_center",
+            "parameter_point": "manifest_case_parameters",
+            "target": "analytic_charge_consistent" if args.analytic_targets else "manifest_observation",
             "parameter_order": list(PARAMETER_NAMES),
         },
     )
