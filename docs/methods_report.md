@@ -85,9 +85,11 @@ failed tasks exit nonzero.
 The backend gate recomputes probe evidence from the actual CPU and GPU probe
 artifacts. It requires matching source/config/manifest fingerprints, exact target
 definition, two clean development cases, observable RMS, objective range/CV, and
-gradient direction/norm thresholds. The P100 route uses public URLs only and
-regenerates an analytic charge-consistent target remotely; no measured data or
-local concentration arrays are uploaded.
+gradient direction/norm thresholds. The final gate passed with maximum
+observable-block RMS `2.91e-10`, objective range `4.94e-12`, gradient cosine
+`1.0`, and maximum gradient norm disagreement `1.12e-7`. The P100 route used
+public URLs only and regenerated an analytic charge-consistent target remotely;
+no measured data or local concentration arrays were uploaded.
 
 ## Limitations and Deferred Work
 
@@ -96,7 +98,8 @@ local concentration arrays are uploaded.
 - Direct concentration is observed; iSCAT optics, drift, and nuisance scales are absent.
 - The 16-case one-replicate set is too small for final recovery statistics.
 - No nondimensional estimate should be translated into a real material constant.
-- Validation and locked-test inversion remain disabled until the final backend gate passes.
+- Validation and locked-test inversion remain disabled until a recovery budget is frozen;
+  the backend reproducibility gate itself has passed.
 
 The next scientific phase should add a validated differentiable iSCAT observation
 operator only after simulation-only recovery and identifiability gates pass.

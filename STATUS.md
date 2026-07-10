@@ -43,16 +43,21 @@ reaction/exchange weight on the canonical 48 x 48 circle.
 
 ## Backend Gate
 
-The final fingerprint-bound CPU/P100 probe is running against public commit
-`a383743` and the exact manifest in `benchmarks/stage16_boundary_v2/`. The
-fingerprint is `3c1023c8c0061569e8e7eeef0c0d6d80b12f57a2db44b0d9954c38713814082e`.
-The gate requires exactly one canonical CPU and one GPU probe, matching probe
+The final fingerprint-bound CPU/P100 probe passed against public commit
+`800ba6d` and the exact manifest in `benchmarks/stage16_boundary_v2/`. The
+fingerprint is `1c156ec7bb7495c87a7f2b19e93d686684ad50f9ae2268c278752ee2cd9031ed`.
+The gate required exactly one canonical CPU and one GPU probe, matching probe
 hashes, target definition, case count, source/config/manifest hashes, and all
-observable/objective/gradient thresholds. Until the comparison artifact passes,
-claim-eligible multistart benchmark runs remain disabled.
+observable/objective/gradient thresholds. Authorization recomputed the gate
+from both probe files and passed.
 
-The P100 run uses public URLs only; it regenerates the analytic, charge-
-consistent reference target remotely and does not upload local source or
+Final cross-backend metrics: maximum observable-block RMS `2.91e-10`, maximum
+objective range `4.94e-12`, gradient cosine `1.0`, and maximum gradient norm
+disagreement `1.12e-7`. The CPU cases took `160.0` and `178.4` seconds; the
+P100 cases took `248.6` and `282.1` seconds.
+
+The P100 run used public URLs only; it regenerated the analytic,
+charge-consistent reference target remotely and did not upload local source or
 concentration arrays.
 
 ## Claim Boundary
