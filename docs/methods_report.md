@@ -26,6 +26,33 @@ dimensionless groups are `epsilon^2 = kappa/(A L^2)`,
 
 ## Numerical Verification
 
+The original masked Cartesian solver was found to be unsuitable for
+claim-bearing morphology. Its phase interface was subpixel at 48-96 pixels and
+its staircase boundary introduced a fourfold source harmonic. A conservative
+nine-point operator and analytic arc weights reduced smooth-stencil error but
+did not remove the cross-shaped transition. Controlled angular RMS remained
+`0.492`, `0.452`, and `0.422` at 48, 64, and 96 pixels.
+
+The circular reference therefore uses concentric annular finite volumes. Cell
+areas weight mass, free energy, and the variational chemical potential. Internal
+face fluxes cancel pairwise, boundary arc length is exactly `2*pi*R`, and a
+square-root-volume similarity transform makes the semi-implicit linear system
+symmetric for conjugate gradients. The 1D radial state is mapped to a 2D
+Cartesian movie by fixed differentiable radial interpolation.
+
+The production reference uses 192 radial cells and a 384-cell refinement run.
+The analytic 10-90 interface spans `7.22` production cells. It passes:
+
+- mean filling `0.5 -> 1.0 -> 0.5`;
+- concentration range `[0.49734, 1.00266]`;
+- mass relative error `3.12e-14`;
+- front refinement displacement `0.0366` production pixels;
+- maximum CG residual `3.58e-8`;
+- raster angular RMS `0.0107` and maximum deviation `0.0225`.
+
+The earlier Cartesian verification below is retained only as pipeline history,
+not current morphology validation.
+
 The cell-centered masked finite-volume Laplacian cancels internal fluxes. The
 reaction uses integer exposed-face counts; interior cells have zero reaction and
 exchange weight. The semi-implicit stabilized CHR step uses matrix-free
@@ -91,10 +118,18 @@ observable-block RMS `2.91e-10`, objective range `4.94e-12`, gradient cosine
 public URLs only and regenerated an analytic charge-consistent target remotely;
 no measured data or local concentration arrays were uploaded.
 
+The radial reference was separately probed on canonical CPU and Kaggle P100
+from public commit `98ab642`. Maximum concentration difference was `7.21e-11`,
+concentration RMS `7.48e-12`, objective difference `9.33e-14`, gradient cosine
+`1.0`, and gradient norm disagreement `7.64e-10`; all radial thresholds passed.
+
 ## Limitations and Deferred Work
 
 - The scalar field is an effective stage order parameter, not a graphite gallery model.
-- Geometry is an idealized circular two-dimensional particle with visible square-grid anisotropy.
+- The current reference is homogeneous and rotationally symmetric. Its 2D movie
+  is rasterized from a 1D radial state and cannot express non-radial mechanisms.
+- The Cartesian cohort and inversion outputs predate the radial backend and are
+  diagnostic only until regenerated through the new solver.
 - Direct concentration is observed; iSCAT optics, drift, and nuisance scales are absent.
 - The 16-case one-replicate set is too small for final recovery statistics.
 - No nondimensional estimate should be translated into a real material constant.
