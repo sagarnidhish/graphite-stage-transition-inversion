@@ -4,98 +4,69 @@ Updated: 2026-07-10
 
 ## Current State
 
-The simulation-only graphite stage 2 to stage 1 benchmark is implemented through
-forward physics, verification, visualization, synthetic generation, inversion,
-baselines, identifiability, resumable execution, GPU payload construction, and
-guarded reporting.
+The repaired simulation-only graphite stage 2 <-> stage 1 pipeline is
+implemented through forward CHR physics, sparse differentiable execution,
+physics-facing observables, synthetic cohort generation, guarded inversion and
+identifiability, baselines, visualizations, and reproducible execution.
 
-The project is not scientifically complete. Full multistart GPU recovery,
-profile likelihoods at a converged optimum, staged ensemble expansion, and the
-locked-test evaluation have not run.
-
-Multistart scaling is now explicitly stopped by a failed backend-reproducibility
-gate. See `docs/backend_reproducibility_report.md`.
-
-The synthetic cohort and all boundary-kinetics/Damkohler evidence are also
-invalidated by a confirmed geometry bug: Boolean neighbor masks were combined
-with logical addition, marking all 1,160 active cells as reactive instead of
-only 108 boundary cells. Repair requirements are frozen in
-`docs/superpowers/specs/2026-07-10-backend-stable-canonical-pipeline-design.md`.
+The original cohort and all earlier boundary-kinetics/Damkohler claims were
+invalidated. The cause was Boolean neighbor addition in `_boundary_face_count`,
+which marked all 1,160 active cells reactive instead of the 108 boundary cells.
+The repair now gives 108 boundary cells, 152 exposed faces, and zero interior
+reaction/exchange weight on the canonical 48 x 48 circle.
 
 ## Verified Evidence
 
-- Test suite: `53 passed` with `PYTHONNOUSERSITE=1 .conda/bin/pytest -q`.
-- Boundary bug reproduction on the canonical grid: 1,160 nonzero reaction
-  weights, weight sum `72.5`, and a single active weight `3*dx`; correct integer
-  face counting must instead give 108 boundary cells and 152 exposed faces.
+- Full test suite: 130 collected tests pass in the pinned Python 3.12.13
+  environment.
+- Repaired forward verification at `dt=0.000125`: mass relative error
+  `2.91e-14`, exact deterministic replay, zero detected relaxation increase,
+  and `0.168` coarse-pixel refinement displacement against a one-pixel gate.
+- Repaired full cycle: mean filling `0.5 -> 1.0 -> 0.5`; active concentration
+  range `[0.4679, 1.0315]`; maximum current mismatch `8.33e-17`; maximum CG
+  residual `6.99e-7`.
+- Repaired cohort: 16 cases, one replicate, 64 records, split 10 development /
+  3 validation / 3 locked-test-labelled; concentration range across clean
+  cases `[0.4653, 1.0347]`, mass relative error below `2.72e-14`, current error
+  below `3.61e-16`.
+- Sparse solver tests prove requested-save alignment, carry-only scan output,
+  diagnostics agreement at `1e-12`, and tiny objective/gradient agreement at
+  `1e-10` relative tolerance.
+- The morphology objective uses equal-area radial filling, pooled structure
+  power, and boundary excess with weights `0.50/0.35/0.15`. Raw pixel and mass
+  mismatch remain diagnostics with zero optimization weight.
+- The exact uncapped inversion residual reproduces the complete objective,
+  including the bounds term. Capped Fisher Jacobians use deterministic
+  stratified morphology/bounds sampling and are labelled reduced approximations.
+- Nonfinite optimizer evaluations and coordinates fail closed and cannot be
+  selected as successful multistart fits.
 
-## Invalidated Historical Evidence
+## Backend Gate
 
-The results below remain recorded for provenance, but they were generated with
-a volumetric source and cannot support the intended boundary-driven CHR model:
+The final fingerprint-bound CPU/P100 probe is running against public commit
+`a383743` and the exact manifest in `benchmarks/stage16_boundary_v2/`. The
+fingerprint is `3c1023c8c0061569e8e7eeef0c0d6d80b12f57a2db44b0d9954c38713814082e`.
+The gate requires exactly one canonical CPU and one GPU probe, matching probe
+hashes, target definition, case count, source/config/manifest hashes, and all
+observable/objective/gradient thresholds. Until the comparison artifact passes,
+claim-eligible multistart benchmark runs remain disabled.
 
-- Canonical mass relative error: `7.1e-11`.
-- Deterministic replay: exact equality.
-- Zero-current relaxation: no detected energy increase.
-- Grid refinement: `0.134` coarse pixels against a `1.0` pixel gate.
-- Full transition: mean filling `0.5 -> 1.0 -> 0.5` at `dt=0.000125`.
-- Full-transition symmetric mass closure after conserved-mode projection:
-  `5.9e-15` absolute (`2.36e-14` relative to transferred charge).
-- Sixteen-case staged benchmark: every case finite, physically bounded, and split-safe.
-- Autodiff: agrees with centered finite differences.
-- Full local inversion probe: finite but stopped after one iteration; 116 seconds.
-- Preliminary local Fisher condition number: `1.14e5` at the unconverged probe.
-- Baseline normalized losses on one clean smoke case: random CHR `0.0896`,
-  Fickian `0.0928`, sharp interface `0.1662`.
-- Public Kaggle P100 scaling probe: two clean development tasks completed with
-  checksum-verified inputs and outputs in `2572.96` seconds (`42.9` minutes).
-  Each task used one start and an intentionally nonconverged one-iteration
-  L-BFGS-B budget, requiring four and six objective/gradient evaluations.
-- The P100 probe exposed two redundant full simulations after every optimizer
-  run. The final value, gradient, and loss components are now returned together
-  and reused; the regression is covered by the 53-test suite. The identical
-  repeat completed in `1787.24` seconds (`29.8` minutes), a `30.5%` speedup.
-- Modal A100-SXM4-80GB completed the same cached two-task probe in `2994.72`
-  seconds (`49.9` minutes), `1.68x` slower than the cached P100 repeat. Modal
-  reported approximately `$2.30` gross resource cost before account credits,
-  including the later forward-only reproducibility diagnostic.
-- Exact-central forward losses failed backend agreement. For development cases
-  `case_17909d05ebd0` and `case_3abdd11a7d1c`, CPU JAX 0.10.2 returned
-  `0.22535` and `0.04726`; P100 JAX 0.7.2 returned `0.23658` and `0.11347`;
-  A100 JAX 0.10.2 returned `0.08843` and `0.23067`. Identical source and data
-  SHA-256 hashes were verified for every remote run.
-- The earlier `dt=0.001` setting was invalidated by `case_4996769a95fe`.
-  `dt=0.0005` then failed `case_ca2908ecd0c2`. That second case completes at
-  `dt=0.000125` with concentration range `0.463` to `1.036`.
-- The complete 16-case, one-replicate forward cohort passes at `dt=0.000125`:
-  global range `0.463` to `1.039`, maximum mass relative error `2.64e-14`,
-  maximum summed-current error `4.04e-15`, 10 development cases, 3 validation
-  cases, 3 locked-test-labelled cases, and no case-level split overlap. No
-  validation or test inversion was used for tuning.
-
-## Active Limitation
-
-The intended boundary-driven model is not yet implemented correctly. In
-addition, the direct pixelwise inversion is too expensive and backend sensitive.
-Roundoff/reduction differences during spinodal growth are the leading mechanism
-hypothesis, but field-level divergence localization is still required. The
-current CPU/P100/A100 mismatch invalidates cross-backend parameter-recovery and
-identifiability claims. No experimental iSCAT movie or measured battery data was
-submitted; remote jobs downloaded only public, checksum-pinned source and
-synthetic Stage-16 assets.
-
-## Next Steps
-
-1. Pin execution versions and localize the first CPU/GPU field divergence.
-2. Design and validate backend-stable linear-solve and sparse-output execution.
-3. Require physics-facing observable and objective agreement across backends.
-4. Freeze a practical multistart iteration budget using development cases only.
-5. Run converged development fits and profile likelihoods.
-6. Evaluate validation, then locked test exactly once after settings are frozen.
-7. Refresh figures and methods report with converged evidence.
+The P100 run uses public URLs only; it regenerates the analytic, charge-
+consistent reference target remotely and does not upload local source or
+concentration arrays.
 
 ## Claim Boundary
 
-Current results are synthetic effective-scalar CHR evidence. They do not analyze
-the experimental iSCAT movie, validate an optical observation model, or estimate
-real graphite material constants.
+This remains synthetic effective-scalar CHR evidence. It is not an iSCAT
+observation model, does not track individual lithium ions, and does not estimate
+real graphite material constants. The square-grid/circular-mask discretization
+also produces visible lattice-oriented morphology, which is retained as a model
+limitation rather than interpreted as graphite crystallographic evidence.
+
+## Next Steps
+
+1. Complete and archive the final CPU/P100 observable backend gate.
+2. Run only bounded, diagnostic development inversion until a practical budget
+   is frozen; keep validation and locked-test fits gated.
+3. Add an iSCAT observation operator after the simulation-only objective and
+   identifiability behavior are understood.

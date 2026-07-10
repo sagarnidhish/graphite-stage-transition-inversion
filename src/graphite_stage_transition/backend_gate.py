@@ -567,7 +567,7 @@ def compare_backend_probes(
             cosines.append(cosine)
             norm_disagreements.append(norm_disagreement)
 
-        minimum_cosine = min(cosines, default=1.0)
+        minimum_cosine = float(np.clip(min(cosines, default=1.0), -1.0, 1.0))
         maximum_norm_disagreement = max(norm_disagreements, default=0.0)
         gradient_metrics[case_id] = {
             "minimum_cosine_similarity": minimum_cosine,
