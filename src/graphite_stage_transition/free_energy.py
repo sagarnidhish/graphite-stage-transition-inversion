@@ -51,8 +51,14 @@ def total_free_energy(
 
     active_x = grid.mask[1:, :] & grid.mask[:-1, :]
     active_y = grid.mask[:, 1:] & grid.mask[:, :-1]
+    active_down = grid.mask[1:, 1:] & grid.mask[:-1, :-1]
+    active_up = grid.mask[1:, :-1] & grid.mask[:-1, 1:]
     delta_x = (field[1:, :] - field[:-1, :]) * active_x
     delta_y = (field[:, 1:] - field[:, :-1]) * active_y
-    gradient = 0.5 * kappa * (jnp.sum(delta_x**2) + jnp.sum(delta_y**2))
+    delta_down = (field[1:, 1:] - field[:-1, :-1]) * active_down
+    delta_up = (field[1:, :-1] - field[:-1, 1:]) * active_up
+    gradient = 0.5 * kappa * (
+        (2.0 / 3.0) * (jnp.sum(delta_x**2) + jnp.sum(delta_y**2))
+        + (1.0 / 6.0) * (jnp.sum(delta_down**2) + jnp.sum(delta_up**2))
+    )
     return homogeneous + gradient
-

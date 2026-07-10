@@ -1,0 +1,33 @@
+[grid]
+# Used for both radial finite volumes and the Cartesian raster output.
+nx = 192
+ny = 192
+length = 1.0
+radius = 0.4
+
+[model]
+mobility = 0.2
+barrier = 1.0
+kappa = 0.0015
+reaction_rate = 0.25
+stage2 = 0.5
+stage1 = 1.0
+
+[protocol]
+# Exact disk area pi*R^2 times a 0.5 filling change over 2.5 time units.
+currents = [0.10053096491487339, 0.0, -0.10053096491487339, 0.0]
+durations = [2.5, 0.4, 2.5, 0.4]
+frames_per_segment = 40
+
+[solver]
+dt = 0.000125
+cg_tolerance = 1e-8
+cg_max_iterations = 2000
+perturbation_amplitude = 0.0
+seed = 7
+
+[inversion]
+starts = 3
+max_iterations = 80
+mass_penalty = 0.0
+bound_penalty = 1e-4

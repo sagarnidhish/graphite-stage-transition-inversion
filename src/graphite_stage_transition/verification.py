@@ -38,6 +38,24 @@ class RefinementGate:
 
 
 @dataclass(frozen=True)
+class IsotropyGate:
+    passed: bool
+    maximum_angular_rms: float
+    maximum_angular_deviation: float
+    tolerance: float
+    radial_bins: int
+    angular_sectors: int
+
+
+@dataclass(frozen=True)
+class RotationEquivarianceGate:
+    passed: bool
+    maximum_absolute_difference: float
+    tolerance: float
+    quarter_turns: int
+
+
+@dataclass(frozen=True)
 class DeterminismGate:
     passed: bool
     max_absolute_difference: float
@@ -232,6 +250,120 @@ def verify_refinement(
         tolerance_pixels=float(tolerance_pixels),
         grid_sizes=sizes,
     )
+
+
+def verify_isotropy(
+    concentration,
+    grid: Grid,
+    stage2: float,
+    stage1: float,
+    radial_bins: int = 12,
+    angular_sectors: int = 16,
+    tolerance: float = 0.05,
+) -> IsotropyGate:
+    """Measure angular variation after conditioning on radius.
+
+    The score is the largest, over frames, of the RMS angular deviation and
+    the largest absolute angular deviation, both normalized by the stage
+    concentration span. Empty radius/angle bins are ignored.
+    """
+    values = np.asarray(concentration, dtype=np.float64)
+    mask = np.asarray(grid.mask, dtype=bool)
+    if values.ndim != 3 or values.shape[1:] != mask.shape or not np.any(mask):
+        raise ValueError("concentration must have shape (time, height, width) matching grid.mask")
+    if radial_bins < 1 or angular_sectors < 4 or not stage2 < stage1:
+        raise ValueError("invalid isotropy binning or stage bounds")
+    y = np.asarray(grid.y, dtype=np.float64)
+    x = np.asarray(grid.x, dtype=np.float64)
+    radius = np.sqrt(x * x + y * y) / max(float(grid.radius), 1e-15)
+    angle = (np.arctan2(y, x) + np.pi) / (2.0 * np.pi)
+    radial_index = np.minimum((radius * radial_bins).astype(int), radial_bins - 1)
+    angular_index = np.minimum((angle * angular_sectors).astype(int), angular_sectors - 1)
+    valid = mask & (radius <= 1.0 + 1e-12)
+    span = float(stage1 - stage2)
+    rms_scores, max_scores = isotropy_scores(
+        values, grid, stage2, stage1, radial_bins, angular_sectors
+    )
+    maximum_rms = max(rms_scores, default=0.0)
+    maximum_deviation = max(max_scores, default=0.0)
+    return IsotropyGate(
+        passed=bool(maximum_rms <= tolerance and maximum_deviation <= 2.0 * tolerance),
+        maximum_angular_rms=float(maximum_rms),
+        maximum_angular_deviation=float(maximum_deviation),
+        tolerance=float(tolerance),
+        radial_bins=int(radial_bins),
+        angular_sectors=int(angular_sectors),
+    )
+
+
+def verify_rotation_equivariance(
+    reference,
+    rotated,
+    quarter_turns: int = 1,
+    tolerance: float = 1e-10,
+) -> RotationEquivarianceGate:
+    """Compare a trajectory with the rotated output of a rotated input run."""
+    first = np.asarray(reference, dtype=np.float64)
+    second = np.asarray(rotated, dtype=np.float64)
+    if first.ndim != 3 or first.shape != second.shape:
+        raise ValueError("rotation trajectories must have matching (time, height, width) shape")
+    if quarter_turns not in (1, 2, 3) or tolerance < 0.0:
+        raise ValueError("quarter_turns must be 1, 2, or 3 and tolerance nonnegative")
+    expected = np.rot90(first, k=quarter_turns, axes=(1, 2))
+    maximum = float(np.max(np.abs(expected - second)))
+    return RotationEquivarianceGate(
+        passed=bool(np.isfinite(maximum) and maximum <= tolerance),
+        maximum_absolute_difference=maximum,
+        tolerance=float(tolerance),
+        quarter_turns=int(quarter_turns),
+    )
+
+
+def isotropy_scores(
+    concentration,
+    grid: Grid,
+    stage2: float,
+    stage1: float,
+    radial_bins: int = 12,
+    angular_sectors: int = 16,
+) -> tuple[list[float], list[float]]:
+    """Return per-frame normalized angular RMS and maximum deviations."""
+    values = np.asarray(concentration, dtype=np.float64)
+    mask = np.asarray(grid.mask, dtype=bool)
+    if values.ndim != 3 or values.shape[1:] != mask.shape or not np.any(mask):
+        raise ValueError("concentration must have shape (time, height, width) matching grid.mask")
+    if radial_bins < 1 or angular_sectors < 4 or not stage2 < stage1:
+        raise ValueError("invalid isotropy binning or stage bounds")
+    y = np.asarray(grid.y, dtype=np.float64)
+    x = np.asarray(grid.x, dtype=np.float64)
+    radius = np.sqrt(x * x + y * y) / max(float(grid.radius), 1e-15)
+    angle = (np.arctan2(y, x) + np.pi) / (2.0 * np.pi)
+    radial_index = np.minimum((radius * radial_bins).astype(int), radial_bins - 1)
+    angular_index = np.minimum((angle * angular_sectors).astype(int), angular_sectors - 1)
+    valid = mask & (radius <= 1.0 + 1e-12)
+    span = float(stage1 - stage2)
+    rms_scores: list[float] = []
+    max_scores: list[float] = []
+    for frame in values:
+        frame_rms: list[float] = []
+        frame_max: list[float] = []
+        for radial_bin in range(radial_bins):
+            radial_cells = valid & (radial_index == radial_bin)
+            if not np.any(radial_cells):
+                continue
+            radial_mean = float(np.mean(frame[radial_cells]))
+            deviations = []
+            for sector in range(angular_sectors):
+                cells = radial_cells & (angular_index == sector)
+                if np.any(cells):
+                    deviations.append(float(np.mean(frame[cells]) - radial_mean))
+            if deviations:
+                scaled = np.asarray(deviations) / span
+                frame_rms.append(float(np.sqrt(np.mean(scaled * scaled))))
+                frame_max.append(float(np.max(np.abs(scaled))))
+        rms_scores.append(max(frame_rms, default=0.0))
+        max_scores.append(max(frame_max, default=0.0))
+    return rms_scores, max_scores
 
 
 def _parameters(config: ProjectConfig) -> CHRParameters:

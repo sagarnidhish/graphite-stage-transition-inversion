@@ -1,13 +1,19 @@
 from pathlib import Path
 
 import numpy as np
+import graphite_stage_transition.verification as verification
 
 from graphite_stage_transition.config import load_config
 from graphite_stage_transition.verification import (
     run_verification_suite,
     verify_full_cycle_transition,
+    verify_isotropy,
     verify_mass_balance,
 )
+from graphite_stage_transition.geometry import make_circle_grid
+from graphite_stage_transition.config import GridConfig, SolverConfig
+from graphite_stage_transition.protocols import make_constant_protocol
+from graphite_stage_transition.solver import CHRParameters, simulate
 
 
 def test_full_cycle_gate_requires_both_stage_endpoints_and_return():
@@ -70,6 +76,58 @@ def test_mass_report_passes_exact_right_endpoint_integral():
 
     assert report.passed
     assert report.max_absolute_error < 1e-14
+
+
+def test_isotropy_gate_passes_radial_field_and_rejects_cross_field():
+    grid = make_circle_grid(GridConfig(64, 64, 2.0, 0.9))
+    radius = np.sqrt(np.asarray(grid.x) ** 2 + np.asarray(grid.y) ** 2)
+    radial = 0.5 + 0.5 * np.exp(-((radius - 0.45) / 0.08) ** 2)
+    radial = np.where(grid.mask, radial, 0.0)
+    radial_gate = verify_isotropy(radial[None, ...], grid, 0.0, 1.0)
+    assert radial_gate.passed
+    cross = radial + 0.20 * (np.abs(np.asarray(grid.x)) < 0.08)
+    cross = np.where(grid.mask, cross, 0.0)
+    cross_gate = verify_isotropy(cross[None, ...], grid, 0.0, 1.0)
+    assert not cross_gate.passed
+    assert cross_gate.maximum_angular_rms > radial_gate.maximum_angular_rms
+
+
+def test_rotation_equivariance_gate_is_available():
+    reference = np.arange(2 * 4 * 4, dtype=float).reshape(2, 4, 4)
+    rotated = np.rot90(reference, axes=(1, 2))
+
+    passed = verification.verify_rotation_equivariance(reference, rotated)
+    failed = verification.verify_rotation_equivariance(reference, reference)
+
+    assert passed.passed
+    assert passed.maximum_absolute_difference == 0.0
+    assert not failed.passed
+
+
+def test_solver_is_quarter_turn_equivariant():
+    grid = make_circle_grid(GridConfig(24, 24, 1.0, 0.4))
+    parameters = CHRParameters(0.05, 0.4, 0.001, 0.2, 0.5, 1.0)
+    solver = SolverConfig(0.001, 1e-10, 100, 0.0, 0)
+    protocol = make_constant_protocol(0.005, steps=6, dt=solver.dt)
+    initial = np.where(
+        grid.mask,
+        0.7 + 0.02 * np.asarray(grid.x) + 0.01 * np.asarray(grid.y) ** 2,
+        0.0,
+    )
+    reference = simulate(grid, protocol, parameters, solver, initial_concentration=initial)
+    rotated = simulate(
+        grid,
+        protocol,
+        parameters,
+        solver,
+        initial_concentration=np.rot90(initial),
+    )
+
+    gate = verification.verify_rotation_equivariance(
+        reference.concentration, rotated.concentration, tolerance=1e-9
+    )
+
+    assert gate.passed
 
 
 def test_canonical_verification_passes():

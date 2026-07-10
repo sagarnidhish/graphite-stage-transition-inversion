@@ -9,6 +9,7 @@ from graphite_stage_transition.free_energy import (
     total_free_energy,
 )
 from graphite_stage_transition.geometry import make_circle_grid
+from graphite_stage_transition.operators import masked_laplacian
 
 
 def test_double_well_has_stage_minima_and_requested_barrier():
@@ -39,3 +40,32 @@ def test_uniform_stage_has_zero_total_free_energy():
     energy = total_free_energy(concentration, grid, barrier=2.0, kappa=0.01, stage2=0.5, stage1=1.0)
 
     assert float(energy) == 0.0
+
+
+def test_total_energy_gradient_matches_full_discrete_chemical_potential():
+    grid = make_circle_grid(GridConfig(nx=20, ny=20, length=1.0, radius=0.4))
+    key = jax.random.key(12)
+    concentration = jnp.where(
+        grid.mask,
+        0.7 + 0.03 * jax.random.normal(key, grid.mask.shape),
+        0.0,
+    )
+    barrier = 1.3
+    kappa = 0.004
+
+    gradient = jax.grad(total_free_energy)(
+        concentration, grid, barrier, kappa, 0.5, 1.0
+    )
+    expected = jnp.where(
+        grid.mask,
+        homogeneous_mu(concentration, barrier, 0.5, 1.0)
+        - kappa * masked_laplacian(concentration, grid),
+        0.0,
+    )
+
+    np.testing.assert_allclose(
+        np.asarray(gradient[grid.mask] / grid.cell_area),
+        np.asarray(expected[grid.mask]),
+        rtol=2e-10,
+        atol=2e-10,
+    )

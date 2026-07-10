@@ -1,5 +1,6 @@
 import numpy as np
 import jax.numpy as jnp
+import pytest
 
 from graphite_stage_transition.config import GridConfig
 from graphite_stage_transition.geometry import (
@@ -18,12 +19,13 @@ def test_boundary_face_count_is_integer_exposed_face_count():
 
 def test_circle_boundary_is_strict_subset_of_active_cells():
     grid = make_circle_grid(GridConfig(nx=48, ny=48, length=1.0, radius=0.4))
-    face_count = np.asarray(grid.boundary_weight / grid.dx)
+    face_count = np.asarray(_boundary_face_count(grid.mask))
 
     assert np.count_nonzero(face_count) == 108
     assert face_count.sum() == 152
     assert set(np.unique(face_count)) == {0.0, 1.0, 2.0}
     assert np.count_nonzero(face_count) < grid.active_count
+    assert np.all(np.asarray(grid.boundary_weight)[face_count == 0] == 0.0)
 
 
 def test_circle_grid_is_centered_and_has_boundary():
@@ -35,6 +37,24 @@ def test_circle_grid_is_centered_and_has_boundary():
     assert float(grid.boundary_weight.sum()) > 0.0
     assert abs(float((grid.x * grid.mask).sum())) < 1e-12
     assert abs(float((grid.y * grid.mask).sum())) < 1e-12
+
+
+def test_circle_boundary_weights_sum_to_analytic_circumference():
+    radius = 0.4
+    grid = make_circle_grid(GridConfig(nx=48, ny=48, length=1.0, radius=radius))
+
+    assert float(grid.boundary_weight.sum()) == pytest.approx(2.0 * np.pi * radius)
+
+
+def test_circle_boundary_weights_are_quarter_turn_equivariant():
+    grid = make_circle_grid(GridConfig(nx=48, ny=48, length=1.0, radius=0.4))
+
+    np.testing.assert_allclose(
+        np.rot90(np.asarray(grid.boundary_weight)),
+        np.asarray(grid.boundary_weight),
+        rtol=0.0,
+        atol=1e-14,
+    )
 
 
 def test_radial_bins_cover_every_active_cell_once():

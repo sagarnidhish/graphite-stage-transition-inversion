@@ -1,0 +1,31 @@
+[grid]
+nx = 48
+ny = 48
+length = 1.0
+radius = 0.4
+
+[model]
+mobility = 0.2
+barrier = 1.0
+kappa = 0.0015
+reaction_rate = 0.25
+stage2 = 0.5
+stage1 = 1.0
+
+[protocol]
+currents = [0.10069444444444445, 0.0, -0.10069444444444445, 0.0]
+durations = [2.5, 0.4, 2.5, 0.4]
+frames_per_segment = 40
+
+[solver]
+dt = 0.000125
+cg_tolerance = 1e-8
+cg_max_iterations = 200
+perturbation_amplitude = 0.0
+seed = 7
+
+[inversion]
+starts = 3
+max_iterations = 80
+mass_penalty = 0.0
+bound_penalty = 1e-4

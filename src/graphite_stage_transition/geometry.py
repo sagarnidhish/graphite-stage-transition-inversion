@@ -35,6 +35,29 @@ def _boundary_face_count(mask: jax.Array) -> jax.Array:
     return jnp.where(mask, 4 - neighbor_count, 0)
 
 
+def _circle_boundary_arc_weights(
+    mask: jax.Array,
+    x: jax.Array,
+    y: jax.Array,
+    radius: float,
+) -> jax.Array:
+    """Assign each reactive cell its angular Voronoi arc on the circle."""
+    boundary = np.asarray(_boundary_face_count(mask) > 0)
+    flat_indices = np.flatnonzero(boundary)
+    if flat_indices.size == 0:
+        raise ValueError("circle grid must contain reactive boundary cells")
+    x_flat = np.asarray(x).reshape(-1)[flat_indices]
+    y_flat = np.asarray(y).reshape(-1)[flat_indices]
+    angles = np.mod(np.arctan2(y_flat, x_flat), 2.0 * np.pi)
+    order = np.argsort(angles)
+    sorted_angles = angles[order]
+    forward_gaps = np.diff(np.concatenate((sorted_angles, sorted_angles[:1] + 2.0 * np.pi)))
+    sorted_weights = radius * 0.5 * (forward_gaps + np.roll(forward_gaps, 1))
+    weights = np.zeros(mask.size, dtype=np.float64)
+    weights[flat_indices[order]] = sorted_weights
+    return jnp.asarray(weights.reshape(mask.shape), dtype=jnp.float64)
+
+
 def make_circle_grid(config: GridConfig) -> Grid:
     """Create a centered circular particle on a cell-centered square grid."""
 
@@ -45,8 +68,7 @@ def make_circle_grid(config: GridConfig) -> Grid:
     y_axis = jnp.linspace(-config.length / 2 + dx / 2, config.length / 2 - dx / 2, config.ny)
     x, y = jnp.meshgrid(x_axis, y_axis, indexing="ij")
     mask = x**2 + y**2 <= config.radius**2
-    face_count = _boundary_face_count(mask)
-    boundary_weight = face_count.astype(jnp.float64) * dx
+    boundary_weight = _circle_boundary_arc_weights(mask, x, y, config.radius)
     return Grid(
         x=x,
         y=y,
