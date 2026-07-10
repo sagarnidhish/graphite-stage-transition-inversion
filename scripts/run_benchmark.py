@@ -101,6 +101,7 @@ def main() -> None:
     parser.add_argument("--cores-per-worker", type=int, default=6)
     parser.add_argument("--base-seed", type=int, default=20260710)
     parser.add_argument("--backend-gate", type=Path)
+    parser.add_argument("--backend-probes", nargs="+", type=Path)
     parser.add_argument("--plan-only", action="store_true")
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
@@ -124,6 +125,11 @@ def main() -> None:
         OBSERVABLE_SCHEMA,
         SEED_POLICY,
         build_execution_fingerprint,
+    )
+    from graphite_stage_transition.backend_gate import (
+        PROBE_CASE_COUNT,
+        PROBE_DEFINITION_SCHEMA,
+        PROBE_DEFINITION_SHA256,
     )
 
     manifest = json.loads(args.manifest.read_text(encoding="ascii"))
@@ -159,6 +165,10 @@ def main() -> None:
         config_path=config_path,
         requirements_path=requirements_path,
         python_version_path=python_version_path,
+        backend_probe_path=project_root / "scripts" / "run_backend_probe.py",
+        probe_case_count=PROBE_CASE_COUNT,
+        probe_definition_schema=PROBE_DEFINITION_SCHEMA,
+        probe_definition_sha256=PROBE_DEFINITION_SHA256,
         observable_schema=OBSERVABLE_SCHEMA,
         optimizer={"starts": args.starts, "maxiter": args.maxiter},
         seed_policy=SEED_POLICY,
@@ -171,13 +181,19 @@ def main() -> None:
                     "CHR validation/test execution requires a matching passed --backend-gate"
                 )
         else:
+            if not args.backend_probes:
+                parser.error("--backend-gate requires --backend-probes evidence files")
             from graphite_stage_transition.backend_gate import (
                 load_backend_gate_result,
                 require_matching_passed_gate,
             )
 
             gate = load_backend_gate_result(args.backend_gate)
-            require_matching_passed_gate(gate, fingerprint["fingerprint_sha256"])
+            require_matching_passed_gate(
+                gate,
+                fingerprint["fingerprint_sha256"],
+                args.backend_probes,
+            )
             claim_eligible = True
     execution = BenchmarkExecution(
         fingerprint_sha256=fingerprint["fingerprint_sha256"],

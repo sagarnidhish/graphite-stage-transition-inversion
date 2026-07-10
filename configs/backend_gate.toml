@@ -8,4 +8,5 @@ gradient_small_norm = 1e-6
 
 [probe]
 target_mode = "analytic_charge_consistent"
-definition_sha256 = "4cc931992ff92321a5f9d9642795f31a8dac884bbd0670eafdde3927b5611ea1"
+case_count = 2
+definition_sha256 = "b5b85582a4ce6bebe8951124e595e137cb79c6e6ba2f1d986c80f560ef452557"

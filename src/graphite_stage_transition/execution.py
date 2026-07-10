@@ -151,12 +151,22 @@ def build_execution_fingerprint(
     config_path: Path,
     requirements_path: Path,
     python_version_path: Path,
+    backend_probe_path: Path,
+    probe_case_count: int,
+    probe_definition_schema: str,
+    probe_definition_sha256: str,
     observable_schema: str,
     optimizer: Mapping[str, Any],
     seed_policy: str,
 ) -> dict[str, Any]:
     """Build a self-verifying record of every claim-relevant execution input."""
 
+    if type(probe_case_count) is not int or probe_case_count < 1:
+        raise ValueError("probe_case_count must be a positive integer")
+    if not probe_definition_schema:
+        raise ValueError("probe_definition_schema must be nonempty")
+    if not re.fullmatch(r"[0-9a-f]{64}", probe_definition_sha256):
+        raise ValueError("probe_definition_sha256 must be a lowercase SHA-256")
     environment = load_canonical_environment(python_version_path, requirements_path)
     components: dict[str, Any] = {
         "source_sha256": source_tree_sha256(source_root),
@@ -165,6 +175,10 @@ def build_execution_fingerprint(
         "requirements_sha256": file_sha256(requirements_path),
         "canonical_environment": environment,
         "canonical_environment_sha256": canonical_json_sha256(environment),
+        "backend_probe_sha256": file_sha256(backend_probe_path),
+        "probe_case_count": probe_case_count,
+        "probe_definition_schema": str(probe_definition_schema),
+        "probe_definition_sha256": str(probe_definition_sha256),
         "observable_schema": str(observable_schema),
         "optimizer": dict(optimizer),
         "seed_policy": str(seed_policy),
@@ -180,6 +194,10 @@ def verify_execution_fingerprint(
     config_path: Path,
     requirements_path: Path,
     python_version_path: Path,
+    backend_probe_path: Path | None = None,
+    expected_probe_case_count: int | None = None,
+    expected_probe_definition_schema: str | None = None,
+    expected_probe_definition_sha256: str | None = None,
 ) -> str:
     """Recompute a persisted fingerprint from the probe's actual local inputs."""
 
@@ -201,12 +219,38 @@ def verify_execution_fingerprint(
     ):
         raise ValueError("execution record does not match canonical environment")
 
+    if (
+        expected_probe_case_count is None
+        or expected_probe_definition_schema is None
+        or expected_probe_definition_sha256 is None
+    ):
+        from .backend_gate import (
+            PROBE_CASE_COUNT,
+            PROBE_DEFINITION_SCHEMA,
+            PROBE_DEFINITION_SHA256,
+        )
+
+        expected_probe_case_count = PROBE_CASE_COUNT
+        expected_probe_definition_schema = PROBE_DEFINITION_SCHEMA
+        expected_probe_definition_sha256 = PROBE_DEFINITION_SHA256
+    expected_probe_contract = {
+        "probe_case_count": expected_probe_case_count,
+        "probe_definition_schema": expected_probe_definition_schema,
+        "probe_definition_sha256": expected_probe_definition_sha256,
+    }
+    if any(declared.get(key) != value for key, value in expected_probe_contract.items()):
+        raise ValueError("persisted execution fingerprint does not match frozen probe contract")
+    if backend_probe_path is None:
+        backend_probe_path = Path(source_root).parents[1] / "scripts" / "run_backend_probe.py"
+
     actual = build_execution_fingerprint(
         source_root=source_root,
         manifest_path=manifest_path,
         config_path=config_path,
         requirements_path=requirements_path,
         python_version_path=python_version_path,
+        backend_probe_path=backend_probe_path,
+        **expected_probe_contract,
         observable_schema=observable_schema,
         optimizer=optimizer,
         seed_policy=seed_policy,

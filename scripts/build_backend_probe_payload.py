@@ -5,21 +5,24 @@ from __future__ import annotations
 
 import argparse
 import base64
-from copy import deepcopy
 import io
 import json
 from pathlib import Path
 import tarfile
+
+from graphite_stage_transition.backend_gate import PROBE_CASE_COUNT
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--fingerprint", type=Path, required=True)
-    parser.add_argument("--max-cases", type=int, default=2)
+    parser.add_argument("--max-cases", type=int, default=PROBE_CASE_COUNT)
     parser.add_argument("--backend-name", default="kaggle-p100")
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
+    if args.max_cases != PROBE_CASE_COUNT:
+        parser.error(f"--max-cases is frozen at {PROBE_CASE_COUNT}")
     project = Path(__file__).resolve().parents[1]
     manifest = json.loads(args.manifest.read_text(encoding="ascii"))
     selected = []
@@ -36,9 +39,19 @@ def main() -> None:
     if len(selected) != args.max_cases:
         raise ValueError("not enough clean development cases for backend probe")
 
-    subset = deepcopy(manifest)
-    subset["records"] = selected
-    subset["metadata"]["config_path"] = "configs/transition.toml"
+    configured = Path(manifest["metadata"]["config_path"])
+    if configured.is_absolute() or ".." in configured.parts:
+        raise ValueError("backend probe config path must be a safe relative path")
+    config_candidates = (
+        configured,
+        args.manifest.parent / configured,
+        args.manifest.parent.parent / configured,
+        project / configured,
+    )
+    try:
+        config_path = next(path for path in config_candidates if path.is_file())
+    except StopIteration as error:
+        raise FileNotFoundError(f"cannot resolve benchmark config {configured}") from error
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
         for path in sorted((project / "src" / "graphite_stage_transition").glob("*.py")):
@@ -47,15 +60,14 @@ def main() -> None:
             project / "scripts" / "run_backend_probe.py",
             arcname="scripts/run_backend_probe.py",
         )
-        archive.add(project / "configs" / "transition.toml", arcname="configs/transition.toml")
+        archive.add(config_path, arcname=configured.as_posix())
+        archive.add(project / ".python-version", arcname=".python-version")
+        archive.add(
+            project / "requirements" / "canonical-cpu.txt",
+            arcname="requirements/canonical-cpu.txt",
+        )
         archive.add(args.fingerprint, arcname="execution.json")
-        manifest_bytes = (json.dumps(subset, sort_keys=True) + "\n").encode("ascii")
-        manifest_info = tarfile.TarInfo("benchmark/manifest.json")
-        manifest_info.size = len(manifest_bytes)
-        archive.addfile(manifest_info, io.BytesIO(manifest_bytes))
-        for record in selected:
-            source = args.manifest.parent / record["observation_path"]
-            archive.add(source, arcname=f"benchmark/{record['observation_path']}")
+        archive.add(args.manifest, arcname="benchmark/manifest.json")
 
     encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
     payload = f'''#!/usr/bin/env python3

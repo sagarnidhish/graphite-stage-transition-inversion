@@ -10,7 +10,7 @@ import jax.numpy as jnp
 import numpy as np
 from scipy.optimize import minimize
 
-from .inversion import InverseProblem, inverse_residual_vector
+from .inversion import InverseProblem, inverse_residual_blocks
 
 
 @dataclass(frozen=True)
@@ -107,15 +107,31 @@ def parameter_correlation(jacobian, relative_cutoff: float = 1e-10) -> np.ndarra
 
 
 def _residual_vector(problem: InverseProblem, unconstrained, max_residuals: int):
-    """Return the exact source residual or a deterministic reduced approximation."""
+    """Return the exact residual or a block-stratified reduced approximation."""
 
-    residual = inverse_residual_vector(problem, unconstrained)
-    if residual.shape[0] <= max_residuals:
-        return residual
-    indices = jnp.asarray(
-        np.rint(np.linspace(0, residual.shape[0] - 1, max_residuals)).astype(np.int32)
-    )
-    return residual[indices]
+    blocks = inverse_residual_blocks(problem, unconstrained)
+    full_size = blocks.morphology.size + blocks.bounds.size
+    if full_size <= max_residuals:
+        return jnp.concatenate(blocks)
+
+    morphology_count = min(blocks.morphology.size, max_residuals // 2)
+    bounds_count = min(blocks.bounds.size, max_residuals - morphology_count)
+    remaining = max_residuals - morphology_count - bounds_count
+    morphology_count += min(remaining, blocks.morphology.size - morphology_count)
+    remaining = max_residuals - morphology_count - bounds_count
+    bounds_count += min(remaining, blocks.bounds.size - bounds_count)
+
+    def reduced(block, count):
+        if count == block.size:
+            return block
+        indices = jnp.asarray(
+            np.rint(np.linspace(0, block.size - 1, count)).astype(np.int32)
+        )
+        return block[indices] * jnp.sqrt(block.size / count)
+
+    reduced_morphology = reduced(blocks.morphology, morphology_count)
+    reduced_bounds = reduced(blocks.bounds, bounds_count)
+    return jnp.concatenate((reduced_morphology, reduced_bounds))
 
 
 def residual_jacobian(

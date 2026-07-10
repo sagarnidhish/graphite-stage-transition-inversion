@@ -34,6 +34,13 @@ class LossComponents(NamedTuple):
     bounds: jax.Array
 
 
+class InverseResidualBlocks(NamedTuple):
+    """Objective-scaled morphology and bounds residual blocks."""
+
+    morphology: jax.Array
+    bounds: jax.Array
+
+
 @dataclass(frozen=True)
 class ParameterTransform:
     """Log transform and declared admissible bounds for positive parameters."""
@@ -166,8 +173,11 @@ def loss_components(problem: InverseProblem, unconstrained) -> LossComponents:
     )
 
 
-def inverse_residual_vector(problem: InverseProblem, unconstrained) -> jax.Array:
-    """Return residuals whose mean square is the complete primary objective."""
+def inverse_residual_blocks(
+    problem: InverseProblem,
+    unconstrained,
+) -> InverseResidualBlocks:
+    """Return blocks scaled against their shared full-residual denominator."""
 
     parameters = problem.transform.from_unconstrained(unconstrained)
     prediction = simulate(
@@ -205,7 +215,14 @@ def inverse_residual_vector(problem: InverseProblem, unconstrained) -> jax.Array
     bound_violations = bound_violations * jnp.sqrt(
         problem.bound_penalty * total_size / bound_violations.size
     )
-    return jnp.concatenate((morphology, bound_violations))
+    return InverseResidualBlocks(morphology, bound_violations)
+
+
+def inverse_residual_vector(problem: InverseProblem, unconstrained) -> jax.Array:
+    """Return residuals whose mean square is the complete primary objective."""
+
+    blocks = inverse_residual_blocks(problem, unconstrained)
+    return jnp.concatenate(blocks)
 
 
 def centered_finite_difference(function, values, step: float = 1e-4) -> np.ndarray:
@@ -305,11 +322,23 @@ def fit_single_start(
         bounds=problem.transform.scipy_bounds(),
         options={"maxiter": int(maxiter), "ftol": 1e-12, "gtol": 1e-8, "maxls": 20},
     )
-    if last_evaluation is None or not np.array_equal(last_evaluation[0], optimized.x):
-        scipy_objective(optimized.x)
+    optimized_values = np.asarray(optimized.x, dtype=np.float64)
+    optimized_coordinates_finite = bool(np.all(np.isfinite(optimized_values)))
+    if not optimized_coordinates_finite:
+        encountered_nonfinite = True
+    if last_evaluation is None:
+        scipy_objective(transformed_initial)
+    elif optimized_coordinates_finite and not np.array_equal(
+        last_evaluation[0], optimized_values
+    ):
+        scipy_objective(optimized_values)
     _, final_value, final_gradient, components = last_evaluation
     runtime = time.perf_counter() - started
-    parameters = problem.transform.from_unconstrained(optimized.x)
+    parameters = (
+        problem.transform.from_unconstrained(optimized_values)
+        if optimized_coordinates_finite
+        else initial
+    )
     groups = {
         name: float(value)
         for name, value in dimensionless_groups(
@@ -335,7 +364,7 @@ def fit_single_start(
         and not encountered_nonfinite
     )
     if encountered_nonfinite:
-        status = "failed: nonfinite objective or gradient evaluation"
+        status = "failed: nonfinite objective, gradient, or optimizer coordinates"
     else:
         status = "converged" if success else f"failed: {optimized.message}"
     return FitResult(

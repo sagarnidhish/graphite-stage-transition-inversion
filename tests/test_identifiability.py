@@ -82,3 +82,30 @@ def test_identifiability_source_residual_matches_complete_objective(monkeypatch)
         rtol=1e-12,
         atol=1e-12,
     )
+
+
+def test_capped_residual_preserves_morphology_coverage(monkeypatch):
+    problem, _, _, near_truth, _ = make_tiny_inverse_problem()
+    radial_offset = 0.04 * (problem.grid.x**2 + problem.grid.y**2)
+    predicted = jnp.where(
+        problem.grid.mask[None],
+        problem.observations + radial_offset[None],
+        0.0,
+    )
+    predicted_mass = jnp.sum(predicted, axis=(1, 2)) * problem.grid.cell_area
+    monkeypatch.setattr(
+        "graphite_stage_transition.inversion.simulate",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            concentration=predicted,
+            mass=predicted_mass,
+        ),
+    )
+
+    residual = _residual_vector(
+        problem,
+        problem.transform.to_unconstrained(near_truth),
+        max_residuals=80,
+    )
+
+    assert residual.shape == (80,)
+    assert np.count_nonzero(np.asarray(residual)) >= 20

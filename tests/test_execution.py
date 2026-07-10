@@ -1,4 +1,11 @@
+import base64
+import io
 import json
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tarfile
 
 import pytest
 
@@ -44,6 +51,8 @@ def test_execution_fingerprint_binds_every_declared_component(tmp_path):
     requirements.write_text("jax==0.10.2\n", encoding="ascii")
     python_version = tmp_path / ".python-version"
     python_version.write_text("3.12.13\n", encoding="ascii")
+    backend_probe = tmp_path / "run_backend_probe.py"
+    backend_probe.write_text("PROBE = 1\n", encoding="ascii")
 
     common = dict(
         source_root=source,
@@ -51,6 +60,10 @@ def test_execution_fingerprint_binds_every_declared_component(tmp_path):
         config_path=config,
         requirements_path=requirements,
         python_version_path=python_version,
+        backend_probe_path=backend_probe,
+        probe_case_count=2,
+        probe_definition_schema="probe-v2|case-count=2",
+        probe_definition_sha256="d" * 64,
         observable_schema="physics-observables-v1",
         optimizer={"starts": 2, "maxiter": 4},
         seed_policy="sha256(base_seed,task_id)-v1",
@@ -64,6 +77,9 @@ def test_execution_fingerprint_binds_every_declared_component(tmp_path):
         ("observable_schema", "physics-observables-v2"),
         ("optimizer", {"starts": 3, "maxiter": 4}),
         ("seed_policy", "different"),
+        ("probe_case_count", 3),
+        ("probe_definition_schema", "probe-v3|case-count=2"),
+        ("probe_definition_sha256", "e" * 64),
     ):
         changed = build_execution_fingerprint(**{**common, key: replacement})
         assert changed["fingerprint_sha256"] != baseline["fingerprint_sha256"]
@@ -78,6 +94,11 @@ def test_execution_fingerprint_binds_every_declared_component(tmp_path):
     assert changed_python["canonical_environment_sha256"] != baseline[
         "canonical_environment_sha256"
     ]
+
+    backend_probe.write_text("PROBE = 2\n", encoding="ascii")
+    changed_probe = build_execution_fingerprint(**common)
+    assert changed_probe["fingerprint_sha256"] != baseline["fingerprint_sha256"]
+    assert changed_probe["backend_probe_sha256"] != baseline["backend_probe_sha256"]
 
 
 def test_canonical_environment_requires_exact_pins(tmp_path):
@@ -162,12 +183,18 @@ def test_execution_fingerprint_verification_recomputes_actual_inputs(tmp_path):
     requirements.write_text("jax==0.10.2\n", encoding="ascii")
     python_version = tmp_path / ".python-version"
     python_version.write_text("3.12.13\n", encoding="ascii")
+    backend_probe = tmp_path / "run_backend_probe.py"
+    backend_probe.write_text("PROBE = 1\n", encoding="ascii")
     fingerprint = build_execution_fingerprint(
         source_root=source,
         manifest_path=manifest,
         config_path=config,
         requirements_path=requirements,
         python_version_path=python_version,
+        backend_probe_path=backend_probe,
+        probe_case_count=2,
+        probe_definition_schema="probe-v2|case-count=2",
+        probe_definition_sha256="d" * 64,
         observable_schema="physics-observables-v1",
         optimizer={"starts": 2, "maxiter": 4},
         seed_policy="sha256(base_seed,task_id)-v1",
@@ -189,6 +216,10 @@ def test_execution_fingerprint_verification_recomputes_actual_inputs(tmp_path):
         config_path=config,
         requirements_path=requirements,
         python_version_path=python_version,
+        backend_probe_path=backend_probe,
+        expected_probe_case_count=2,
+        expected_probe_definition_schema="probe-v2|case-count=2",
+        expected_probe_definition_sha256="d" * 64,
     )
     assert verified == fingerprint["fingerprint_sha256"]
 
@@ -201,4 +232,117 @@ def test_execution_fingerprint_verification_recomputes_actual_inputs(tmp_path):
             config_path=config,
             requirements_path=requirements,
             python_version_path=python_version,
+            backend_probe_path=backend_probe,
+            expected_probe_case_count=2,
+            expected_probe_definition_schema="probe-v2|case-count=2",
+            expected_probe_definition_sha256="d" * 64,
         )
+
+
+def test_execution_fingerprint_verification_rejects_nonfrozen_probe_contract(tmp_path):
+    source = tmp_path / "src"
+    source.mkdir()
+    (source / "model.py").write_text("VALUE = 1\n", encoding="ascii")
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text('{"revision":"r1"}\n', encoding="ascii")
+    config = tmp_path / "config.toml"
+    config.write_text("[solver]\ndt=0.1\n", encoding="ascii")
+    requirements = tmp_path / "requirements.txt"
+    requirements.write_text("jax==0.10.2\n", encoding="ascii")
+    python_version = tmp_path / ".python-version"
+    python_version.write_text("3.12.13\n", encoding="ascii")
+    backend_probe = tmp_path / "run_backend_probe.py"
+    backend_probe.write_text("PROBE = 1\n", encoding="ascii")
+    fingerprint = build_execution_fingerprint(
+        source_root=source,
+        manifest_path=manifest,
+        config_path=config,
+        requirements_path=requirements,
+        python_version_path=python_version,
+        backend_probe_path=backend_probe,
+        probe_case_count=3,
+        probe_definition_schema="probe-v2|case-count=3",
+        probe_definition_sha256="e" * 64,
+        observable_schema="physics-observables-v1",
+        optimizer={"starts": 2, "maxiter": 4},
+        seed_policy="sha256(base_seed,task_id)-v1",
+    )
+    record = {
+        "execution": {
+            "fingerprint_sha256": fingerprint["fingerprint_sha256"],
+            "canonical_environment_sha256": fingerprint[
+                "canonical_environment_sha256"
+            ],
+        },
+        "fingerprint": fingerprint,
+    }
+
+    with pytest.raises(ValueError, match="probe contract"):
+        verify_execution_fingerprint(
+            record,
+            source_root=source,
+            manifest_path=manifest,
+            config_path=config,
+            requirements_path=requirements,
+            python_version_path=python_version,
+            backend_probe_path=backend_probe,
+            expected_probe_case_count=2,
+            expected_probe_definition_schema="probe-v2|case-count=2",
+            expected_probe_definition_sha256="d" * 64,
+        )
+
+
+def test_backend_probe_payload_bundles_exact_inputs_without_observations(tmp_path):
+    project_root = Path(__file__).resolve().parents[1]
+    manifest = tmp_path / "manifest.json"
+    manifest_payload = {
+        "metadata": {"config_path": "configs/transition.toml"},
+        "records": [
+            {
+                "case_id": f"case_{index}",
+                "split": "development",
+                "noise_fraction": 0.0,
+                "observation_path": f"missing/case_{index}.npz",
+            }
+            for index in range(3)
+        ],
+    }
+    manifest.write_text(
+        json.dumps(manifest_payload, indent=2) + "\n",
+        encoding="ascii",
+    )
+    fingerprint = tmp_path / "execution.json"
+    fingerprint.write_text('{"fingerprint":"exact"}\n', encoding="ascii")
+    output = tmp_path / "payload.py"
+
+    subprocess.run(
+        [
+            sys.executable,
+            str(project_root / "scripts" / "build_backend_probe_payload.py"),
+            "--manifest",
+            str(manifest),
+            "--fingerprint",
+            str(fingerprint),
+            "--max-cases",
+            "2",
+            "--out",
+            str(output),
+        ],
+        check=True,
+        cwd=project_root,
+    )
+
+    payload = output.read_text(encoding="ascii")
+    encoded = re.search(r'ARCHIVE_B64 = "([A-Za-z0-9+/=]+)"', payload).group(1)
+    with tarfile.open(
+        fileobj=io.BytesIO(base64.b64decode(encoded)), mode="r:gz"
+    ) as archive:
+        names = set(archive.getnames())
+        bundled_manifest = archive.extractfile("benchmark/manifest.json").read()
+    assert bundled_manifest == manifest.read_bytes()
+    assert ".python-version" in names
+    assert "requirements/canonical-cpu.txt" in names
+    assert "scripts/run_backend_probe.py" in names
+    assert not any(name.endswith(".npz") for name in names)
+    assert '"--max-cases", "2"' in payload
+    assert '"--analytic-targets"' in payload

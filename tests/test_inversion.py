@@ -17,6 +17,7 @@ from graphite_stage_transition.inversion import (
     dimensionless_groups,
     fit_single_start,
     fit_multistart,
+    inverse_residual_blocks,
     inverse_residual_vector,
     loss_components,
     relative_group_error,
@@ -164,9 +165,13 @@ def test_inverse_residual_mean_square_matches_full_primary_objective(monkeypatch
     values = TRANSFORM.to_unconstrained(near_truth)
 
     components = problem.components(values)
+    blocks = inverse_residual_blocks(problem, values)
     residual = inverse_residual_vector(problem, values)
 
     assert float(components.bounds) > 0.0
+    assert blocks.morphology.size > 0
+    assert blocks.bounds.size > blocks.morphology.size
+    np.testing.assert_allclose(jnp.concatenate(blocks), residual, rtol=0.0, atol=0.0)
     np.testing.assert_allclose(
         jnp.mean(residual**2),
         components.total,
@@ -349,6 +354,46 @@ def test_nonfinite_gradient_fails_start(monkeypatch):
 
     assert not result.success
     assert "nonfinite" in result.status
+
+
+def test_nonfinite_optimized_coordinates_report_finite_initial_parameters(monkeypatch):
+    class FiniteProblem:
+        transform = TRANSFORM
+        grid = SimpleNamespace(dx=1.0, mask=np.ones((1, 1), dtype=bool))
+
+        @staticmethod
+        def components(values):
+            total = jnp.sum(values**2)
+            zero = jnp.asarray(0.0)
+            return LossComponents(total, zero, zero, zero, total, zero, zero)
+
+    def nonfinite_result_minimize(objective, values, **_kwargs):
+        value, gradient = objective(values)
+        return SimpleNamespace(
+            x=np.full_like(values, np.nan),
+            fun=value,
+            jac=gradient,
+            success=True,
+            message="converged",
+            nit=0,
+        )
+
+    monkeypatch.setattr(
+        "graphite_stage_transition.inversion.jax.jit", lambda function: function
+    )
+    monkeypatch.setattr(
+        "graphite_stage_transition.inversion.minimize",
+        nonfinite_result_minimize,
+    )
+    initial = CHRParameters(0.1, 0.7, 0.0012, 0.2, 0.5, 1.0)
+
+    result = fit_single_start(FiniteProblem(), initial, maxiter=1)
+
+    assert not result.success
+    assert result.parameters == result.initial_parameters
+    assert all(np.isfinite(value) for value in result.parameters.values())
+    assert all(np.isfinite(value) for value in result.groups.values())
+    json.dumps(asdict(result), allow_nan=False)
 
 
 def test_multistart_excludes_failed_finite_result(monkeypatch):

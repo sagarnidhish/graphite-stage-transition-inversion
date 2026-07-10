@@ -17,8 +17,10 @@ PROBE_SCHEMA_VERSION = 2
 GATE_SCHEMA_VERSION = 2
 
 ANALYTIC_TARGET_MODE = "analytic_charge_consistent"
+PROBE_CASE_COUNT = 2
 PROBE_DEFINITION_SCHEMA = (
     "graphite-stage-transition-backend-probe-v2|clean-development-cases|"
+    "case-count=2|"
     "manifest-case-parameters|analytic-charge-consistent-target|"
     "physics-observables-v1|primary-objective-gradient"
 )
@@ -286,11 +288,63 @@ def _validate_gate_result(result: BackendGateResult) -> None:
             raise ValueError("passed gate requires a valid probe definition SHA-256")
         if dict(result.thresholds) != asdict(DEFAULT_THRESHOLDS):
             raise ValueError("passed gate requires the frozen thresholds")
+        if any(
+            type(value) not in (int, float) or not np.isfinite(value)
+            for value in result.thresholds.values()
+        ):
+            raise ValueError("passed gate thresholds must be finite numbers")
         if any(not result.metrics[name] for name in _METRIC_SECTIONS):
             raise ValueError("passed gate requires nonempty complete metric sections")
         metric_case_sets = [set(result.metrics[name]) for name in _METRIC_SECTIONS]
         if any(case_ids != metric_case_sets[0] for case_ids in metric_case_sets[1:]):
             raise ValueError("passed gate metric sections must cover the same cases")
+        _validate_passed_metrics(result.metrics)
+
+
+def _finite_metric(value: Any) -> bool:
+    return type(value) in (int, float) and bool(np.isfinite(value))
+
+
+def _validate_passed_metrics(metrics: Mapping[str, Any]) -> None:
+    for case_id in metrics["observable_block_rms"]:
+        if not isinstance(case_id, str) or not case_id:
+            raise ValueError("metric case IDs must be nonempty strings")
+        observable = metrics["observable_block_rms"][case_id]
+        objective = metrics["primary_objective"][case_id]
+        gradient = metrics["gradient"][case_id]
+        if not isinstance(observable, Mapping) or not observable:
+            raise ValueError("observable metrics must contain nonempty blocks")
+        if any(
+            not isinstance(name, str)
+            or not name
+            or not _finite_metric(value)
+            or value < 0.0
+            for name, value in observable.items()
+        ):
+            raise ValueError("observable metrics must be finite nonnegative values")
+        if not isinstance(objective, Mapping) or set(objective) != {
+            "range",
+            "coefficient_of_variation",
+        }:
+            raise ValueError("objective metrics are incomplete")
+        if any(not _finite_metric(value) or value < 0.0 for value in objective.values()):
+            raise ValueError("objective metrics must be finite nonnegative values")
+        if not isinstance(gradient, Mapping) or set(gradient) != {
+            "minimum_cosine_similarity",
+            "maximum_norm_disagreement",
+            "all_pairs_below_small_norm",
+        }:
+            raise ValueError("gradient metrics are incomplete")
+        cosine = gradient["minimum_cosine_similarity"]
+        disagreement = gradient["maximum_norm_disagreement"]
+        if not _finite_metric(cosine) or not -1.0 <= cosine <= 1.0:
+            raise ValueError("gradient cosine metric must be finite and lie in [-1, 1]")
+        if not _finite_metric(disagreement) or disagreement < 0.0:
+            raise ValueError(
+                "gradient norm disagreement metric must be finite and nonnegative"
+            )
+        if type(gradient["all_pairs_below_small_norm"]) is not bool:
+            raise ValueError("gradient small-norm metric must be a boolean")
 
 
 def load_backend_gate_thresholds(path: Path) -> BackendGateThresholds:
@@ -394,6 +448,10 @@ def compare_backend_probes(
     fingerprint = next(iter(fingerprints)) if len(fingerprints) == 1 else None
     if fingerprint is None:
         failures.append("probe execution fingerprint mismatch")
+    if any(len(probe.cases) != PROBE_CASE_COUNT for probe in probes):
+        failures.append(
+            f"backend probes must contain exactly {PROBE_CASE_COUNT} cases"
+        )
 
     backend_kinds = {probe.backend: probe.backend_kind for probe in probes}
     kinds = tuple(backend_kinds.values())
@@ -570,6 +628,7 @@ def load_backend_gate_result(path: Path) -> BackendGateResult:
 def require_matching_passed_gate(
     result: BackendGateResult,
     fingerprint_sha256: str,
+    probes: Sequence[BackendProbe | Path | str],
     *,
     expected_target_mode: str = ANALYTIC_TARGET_MODE,
     expected_probe_definition_sha256: str = PROBE_DEFINITION_SHA256,
@@ -589,6 +648,13 @@ def require_matching_passed_gate(
         raise ValueError(
             "backend gate probe definition does not match required probe definition"
         )
+    loaded_probes = tuple(
+        probe if isinstance(probe, BackendProbe) else load_backend_probe(Path(probe))
+        for probe in probes
+    )
+    recomputed = compare_backend_probes(loaded_probes, DEFAULT_THRESHOLDS)
+    if result != recomputed:
+        raise ValueError("backend gate does not match recomputed probe evidence")
 
 
 __all__ = [
@@ -599,6 +665,7 @@ __all__ = [
     "BackendProbe",
     "DEFAULT_THRESHOLDS",
     "ProbeCase",
+    "PROBE_CASE_COUNT",
     "PROBE_DEFINITION_SCHEMA",
     "PROBE_DEFINITION_SHA256",
     "compare_backend_probes",

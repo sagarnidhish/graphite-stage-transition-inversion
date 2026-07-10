@@ -6,6 +6,7 @@ import pytest
 
 from graphite_stage_transition.backend_gate import (
     ANALYTIC_TARGET_MODE,
+    PROBE_CASE_COUNT,
     PROBE_DEFINITION_SHA256,
     BackendGateThresholds,
     BackendProbe,
@@ -67,6 +68,7 @@ def _probe(
     probe_definition_sha256=PROBE_DEFINITION_SHA256,
     jax_default_backend=None,
     metadata_target_mode=None,
+    case_count=PROBE_CASE_COUNT,
     radial=(0.2, 0.4, 0.6),
     structure=(0.1, 0.3),
     boundary=(0.05,),
@@ -85,9 +87,9 @@ def _probe(
         fingerprint_sha256=fingerprint,
         target_mode=target_mode,
         probe_definition_sha256=probe_definition_sha256,
-        cases=(
+        cases=tuple(
             ProbeCase(
-                case_id="case-a",
+                case_id=f"case-{chr(ord('a') + index)}",
                 observable_blocks={
                     "radial_profile": radial,
                     "structure_power": structure,
@@ -95,7 +97,8 @@ def _probe(
                 },
                 primary_objective=objective,
                 gradient=gradient,
-            ),
+            )
+            for index in range(case_count)
         ),
         metadata={
             "device": backend,
@@ -129,6 +132,7 @@ def test_checked_in_config_freezes_approved_thresholds():
     assert loaded == THRESHOLDS
     assert policy == {
         "target_mode": ANALYTIC_TARGET_MODE,
+        "case_count": PROBE_CASE_COUNT,
         "definition_sha256": PROBE_DEFINITION_SHA256,
     }
 
@@ -240,6 +244,16 @@ def test_two_cpu_probes_cannot_pass_even_when_backend_labels_differ():
     assert any("at least one gpu" in failure for failure in result.failures)
 
 
+def test_probe_case_count_is_frozen_by_the_probe_definition():
+    result = compare_backend_probes(
+        (_probe("cpu", case_count=1), _probe("p100", case_count=1)),
+        THRESHOLDS,
+    )
+
+    assert not result.passed
+    assert any("exactly 2 cases" in failure for failure in result.failures)
+
+
 @pytest.mark.parametrize(
     ("backend_kind", "jax_default_backend"),
     (("canonical_cpu", "gpu"), ("gpu", "cpu")),
@@ -298,62 +312,61 @@ def test_explicit_target_mode_must_be_backed_by_probe_metadata():
 
 
 def test_noncanonical_matching_target_cannot_authorize_by_default():
-    result = compare_backend_probes(
-        (
-            _probe("cpu", target_mode="manifest_observation"),
-            _probe("p100", target_mode="manifest_observation"),
-        ),
-        THRESHOLDS,
+    probes = (
+        _probe("cpu", target_mode="manifest_observation"),
+        _probe("p100", target_mode="manifest_observation"),
     )
+    result = compare_backend_probes(probes, THRESHOLDS)
 
     assert result.passed
     with pytest.raises(ValueError, match="target mode"):
-        require_matching_passed_gate(result, "fingerprint-a")
+        require_matching_passed_gate(result, "fingerprint-a", probes)
 
 
 def test_gate_result_round_trip_and_matching_requirement(tmp_path):
     path = tmp_path / "gate.json"
-    result = compare_backend_probes((_probe("cpu"), _probe("p100")), THRESHOLDS)
+    probes = (_probe("cpu"), _probe("p100"))
+    result = compare_backend_probes(probes, THRESHOLDS)
     save_backend_gate_result(result, path)
 
     loaded = load_backend_gate_result(path)
 
     assert loaded == result
-    require_matching_passed_gate(loaded, "fingerprint-a")
+    require_matching_passed_gate(loaded, "fingerprint-a", probes)
     with pytest.raises(ValueError, match="fingerprint"):
-        require_matching_passed_gate(loaded, "fingerprint-b")
+        require_matching_passed_gate(loaded, "fingerprint-b", probes)
     with pytest.raises(ValueError, match="target mode"):
         require_matching_passed_gate(
             loaded,
             "fingerprint-a",
+            probes,
             expected_target_mode="manifest_observation",
         )
     with pytest.raises(ValueError, match="probe definition"):
         require_matching_passed_gate(
             loaded,
             "fingerprint-a",
+            probes,
             expected_probe_definition_sha256="b" * 64,
         )
 
 
 def test_failed_gate_cannot_authorize_claim_eligible_execution():
-    failed = compare_backend_probes(
-        (_probe("cpu"), _probe("p100", boundary=(0.08,))), THRESHOLDS
-    )
+    probes = (_probe("cpu"), _probe("p100", boundary=(0.08,)))
+    failed = compare_backend_probes(probes, THRESHOLDS)
 
     with pytest.raises(ValueError, match="did not pass"):
-        require_matching_passed_gate(failed, "fingerprint-a")
+        require_matching_passed_gate(failed, "fingerprint-a", probes)
 
 
 def test_gate_with_noncanonical_thresholds_cannot_authorize_claims():
     loose = BackendGateThresholds(observable_block_rms_max=1.0)
-    result = compare_backend_probes(
-        (_probe("cpu"), _probe("p100", boundary=(0.08,))), loose
-    )
+    probes = (_probe("cpu"), _probe("p100", boundary=(0.08,)))
+    result = compare_backend_probes(probes, loose)
     assert not result.passed
 
     with pytest.raises(ValueError, match="frozen thresholds"):
-        require_matching_passed_gate(result, "fingerprint-a")
+        require_matching_passed_gate(result, "fingerprint-a", probes)
 
 
 def test_gate_result_rejects_inconsistent_passed_flag():
@@ -403,3 +416,49 @@ def test_loader_rejects_adversarial_passed_json(tmp_path):
 
     with pytest.raises(ValueError, match="invalid backend gate result"):
         load_backend_gate_result(path)
+
+
+@pytest.mark.parametrize(
+    "metric_path",
+    (
+        ("observable_block_rms", "case-a", "radial_profile"),
+        ("primary_objective", "case-a", "range"),
+        ("gradient", "case-a", "minimum_cosine_similarity"),
+    ),
+)
+def test_loader_rejects_nonfinite_per_case_metrics(tmp_path, metric_path):
+    probes = (_probe("cpu"), _probe("p100"))
+    valid = compare_backend_probes(probes, THRESHOLDS)
+    payload = json.loads(json.dumps(valid.__dict__))
+    section, case_id, field = metric_path
+    payload["metrics"][section][case_id][field] = float("nan")
+    path = tmp_path / "nonfinite-gate.json"
+    path.write_text(json.dumps(payload), encoding="ascii")
+
+    with pytest.raises(ValueError, match="invalid backend gate result.*finite"):
+        load_backend_gate_result(path)
+
+
+@pytest.mark.parametrize("forgery", ("metrics", "probe_sha256"))
+def test_authorization_recomputes_gate_from_probe_evidence(forgery):
+    probes = (_probe("cpu"), _probe("p100"))
+    valid = compare_backend_probes(probes, THRESHOLDS)
+    payload = json.loads(json.dumps(valid.__dict__))
+    if forgery == "metrics":
+        payload["metrics"]["primary_objective"]["case-a"]["range"] = 0.004
+    else:
+        payload["probe_sha256"]["p100"] = "a" * 64
+    forged = BackendGateResult(**payload)
+
+    with pytest.raises(ValueError, match="recomputed probe evidence"):
+        require_matching_passed_gate(forged, "fingerprint-a", probes)
+
+
+def test_authorization_accepts_serialized_probe_artifacts(tmp_path):
+    probes = (_probe("cpu"), _probe("p100"))
+    paths = (tmp_path / "cpu.json", tmp_path / "gpu.json")
+    for probe, path in zip(probes, paths, strict=True):
+        save_backend_probe(probe, path)
+    result = compare_backend_probes(probes, THRESHOLDS)
+
+    require_matching_passed_gate(result, "fingerprint-a", paths)
