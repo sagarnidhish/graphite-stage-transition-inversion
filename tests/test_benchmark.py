@@ -11,7 +11,10 @@ from graphite_stage_transition.benchmark import (
     resume_benchmark,
     write_success_marker,
 )
-from graphite_stage_transition.gpu_payload import build_gpu_payload
+from graphite_stage_transition.gpu_payload import (
+    build_gpu_payload,
+    build_public_gpu_bootstrap,
+)
 
 
 def _smoke_manifest():
@@ -90,3 +93,26 @@ def test_gpu_payload_embeds_sources_manifest_and_selected_data(tmp_path: Path):
     with tarfile.open(fileobj=io.BytesIO(base64.b64decode(encoded)), mode="r:gz") as archive:
         embedded = json.load(archive.extractfile("benchmark/manifest.json"))
     assert {record["split"] for record in embedded["records"]} == {"development"}
+
+
+def test_public_gpu_bootstrap_contains_only_public_urls_and_hashes(tmp_path: Path):
+    output = tmp_path / "public_probe.py"
+
+    build_public_gpu_bootstrap(
+        release_base="https://github.com/example/project/releases/download/v1",
+        source_asset="source.tar.gz",
+        source_sha256="a" * 64,
+        data_asset="synthetic.tar.gz",
+        data_sha256="b" * 64,
+        output_script=output,
+        max_cases=2,
+        starts=1,
+        maxiter=1,
+    )
+
+    text = output.read_text()
+    assert "ARCHIVE_B64" not in text
+    assert "https://github.com/example/project/releases/download/v1/source.tar.gz" in text
+    assert "a" * 64 in text
+    assert "development" in text
+    assert "kgpu_graphite_results.tar.gz" in text

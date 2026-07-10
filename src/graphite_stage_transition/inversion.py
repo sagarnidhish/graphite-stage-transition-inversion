@@ -171,17 +171,32 @@ def fit_single_start(
     """Fit one deterministic L-BFGS-B start and retain failed-run accounting."""
 
     transformed_initial = np.asarray(problem.transform.to_unconstrained(initial), dtype=np.float64)
-    objective_and_gradient = jax.jit(jax.value_and_grad(problem.loss))
+
+    def objective_with_components(values):
+        components = problem.components(values)
+        return components.total, components
+
+    objective_and_gradient = jax.jit(
+        jax.value_and_grad(objective_with_components, has_aux=True)
+    )
     evaluations = 0
+    last_evaluation = None
 
     def scipy_objective(values):
-        nonlocal evaluations
-        value, gradient = objective_and_gradient(jnp.asarray(values))
+        nonlocal evaluations, last_evaluation
+        (value, components), gradient = objective_and_gradient(jnp.asarray(values))
         evaluations += 1
         value_float = float(value)
         gradient_array = np.asarray(gradient, dtype=np.float64)
         if not np.isfinite(value_float) or not np.all(np.isfinite(gradient_array)):
-            return 1e30, np.zeros_like(values)
+            value_float = 1e30
+            gradient_array = np.zeros_like(values)
+        last_evaluation = (
+            np.asarray(values, dtype=np.float64).copy(),
+            value_float,
+            gradient_array,
+            components,
+        )
         return value_float, gradient_array
 
     started = time.perf_counter()
@@ -193,10 +208,10 @@ def fit_single_start(
         bounds=problem.transform.scipy_bounds(),
         options={"maxiter": int(maxiter), "ftol": 1e-12, "gtol": 1e-8, "maxls": 20},
     )
+    if last_evaluation is None or not np.array_equal(last_evaluation[0], optimized.x):
+        scipy_objective(optimized.x)
+    _, final_value, final_gradient, components = last_evaluation
     runtime = time.perf_counter() - started
-    final_value, final_gradient = scipy_objective(optimized.x)
-    components = problem.components(jnp.asarray(optimized.x))
-    evaluations += 1
     parameters = problem.transform.from_unconstrained(optimized.x)
     groups = {
         name: float(value)

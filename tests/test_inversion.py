@@ -1,4 +1,5 @@
 from dataclasses import replace
+from types import SimpleNamespace
 
 import jax
 import jax.numpy as jnp
@@ -8,9 +9,11 @@ from graphite_stage_transition.config import GridConfig, SolverConfig
 from graphite_stage_transition.geometry import make_circle_grid
 from graphite_stage_transition.inversion import (
     InverseProblem,
+    LossComponents,
     ParameterTransform,
     centered_finite_difference,
     dimensionless_groups,
+    fit_single_start,
     fit_multistart,
     relative_group_error,
 )
@@ -102,6 +105,50 @@ def test_tiny_clean_recovery_reduces_group_error():
     assert relative_group_error(result.best.groups, truth_groups).max() < 0.05
     assert len(result.starts) == 2
     assert all(start.forward_solves > 0 for start in result.starts)
+
+
+def test_fit_reuses_components_from_final_objective_evaluation(monkeypatch):
+    class CountingProblem:
+        transform = TRANSFORM
+        grid = SimpleNamespace(dx=1.0, mask=np.ones((1, 1), dtype=bool))
+
+        def __init__(self):
+            self.calls = 0
+
+        def components(self, values):
+            self.calls += 1
+            target = jnp.log(jnp.asarray([0.1, 0.7, 0.0012, 0.2]))
+            movie = jnp.sum((values - target) ** 2)
+            zero = jnp.asarray(0.0)
+            return LossComponents(movie, movie, zero, zero)
+
+        def loss(self, values):
+            return self.components(values).total
+
+    def single_evaluation_minimize(objective, values, **_kwargs):
+        value, gradient = objective(values)
+        return SimpleNamespace(
+            x=np.asarray(values),
+            fun=value,
+            jac=gradient,
+            success=True,
+            message="converged",
+            nit=0,
+        )
+
+    problem = CountingProblem()
+    initial = CHRParameters(0.1, 0.7, 0.0012, 0.2, 0.5, 1.0)
+    monkeypatch.setattr("graphite_stage_transition.inversion.jax.jit", lambda function: function)
+    monkeypatch.setattr(
+        "graphite_stage_transition.inversion.minimize",
+        single_evaluation_minimize,
+    )
+
+    result = fit_single_start(problem, initial, maxiter=1)
+
+    assert problem.calls == 1
+    assert result.forward_solves == 1
+    assert result.components["movie"] == 0.0
 
 
 def test_reaction_scale_changes_spatial_field_while_preserving_total_current():

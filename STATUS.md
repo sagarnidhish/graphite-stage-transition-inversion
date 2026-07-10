@@ -15,7 +15,7 @@ locked-test evaluation have not run.
 
 ## Verified Evidence
 
-- Test suite: `51 passed` with `PYTHONNOUSERSITE=1 .conda/bin/pytest -q`.
+- Test suite: `53 passed` with `PYTHONNOUSERSITE=1 .conda/bin/pytest -q`.
 - Canonical mass relative error: `7.1e-11`.
 - Deterministic replay: exact equality.
 - Zero-current relaxation: no detected energy increase.
@@ -29,6 +29,14 @@ locked-test evaluation have not run.
 - Preliminary local Fisher condition number: `1.14e5` at the unconverged probe.
 - Baseline normalized losses on one clean smoke case: random CHR `0.0896`,
   Fickian `0.0928`, sharp interface `0.1662`.
+- Public Kaggle P100 scaling probe: two clean development tasks completed with
+  checksum-verified inputs and outputs in `2572.96` seconds (`42.9` minutes).
+  Each task used one start and an intentionally nonconverged one-iteration
+  L-BFGS-B budget, requiring four and six objective/gradient evaluations.
+- The P100 probe exposed two redundant full simulations after every optimizer
+  run. The final value, gradient, and loss components are now returned together
+  and reused; the regression is covered by the 53-test suite. A repeat P100
+  timing is still required to measure the realized speedup.
 - The earlier `dt=0.001` setting was invalidated by `case_4996769a95fe`.
   `dt=0.0005` then failed `case_ca2908ecd0c2`. That second case completes at
   `dt=0.000125` with concentration range `0.463` to `1.036`.
@@ -38,20 +46,24 @@ locked-test evaluation have not run.
   cases, 3 locked-test-labelled cases, and no case-level split overlap. No
   validation or test inversion was used for tuning.
 
-## Active Dependency
+## Active Limitation
 
-The generated `kgpu` payload contains repository source and synthetic NPZ arrays.
-Submission to Kaggle was rejected by the external-data-export review pending an
-explicit user acknowledgment that Kaggle is an external service. No experimental
-iSCAT movie or measured battery data is included in the payload.
+The current float64 differentiable inversion is too expensive for the declared
+full cohort on a single P100 without further optimization. The first scaling
+probe averaged `21.4` minutes per clean one-start, one-iteration task, including
+JIT and bookkeeping. No experimental iSCAT movie or measured battery data was
+submitted; the job downloaded only the public source and synthetic Stage-16
+release assets with verified SHA-256 checksums.
 
 ## Next Steps
 
-1. Submit the two-case, one-start, one-iteration P100 scaling probe after approval.
-2. Retrieve and checksum GPU results; compare GPU and CPU losses/groups.
+1. Publish the cached-objective source revision and repeat the identical P100
+   probe to measure the speedup without changing the cohort or optimizer budget.
+2. Profile steady objective/gradient time and decide whether additional solver
+   work or a smaller guarded development design is required.
 3. Freeze a practical multistart iteration budget using development cases only.
 4. Run converged development fits and profile likelihoods.
-5. Decide whether 64 cases x 3 replicates is feasible from GPU inversion timing.
+5. Decide whether broader noise/case evaluation is feasible from measured timing.
 6. Evaluate validation, then locked test exactly once after settings are frozen.
 7. Refresh figures and methods report with converged evidence.
 
