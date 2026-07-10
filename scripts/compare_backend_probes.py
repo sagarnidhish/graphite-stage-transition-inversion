@@ -32,7 +32,18 @@ def main() -> None:
     probes = tuple(load_backend_probe(path) for path in args.probes)
     result = compare_backend_probes(probes, thresholds)
     save_backend_gate_result(result, args.out)
-    print(json.dumps({"passed": result.passed, "failures": result.failures}))
+    print(
+        json.dumps(
+            {
+                "passed": result.passed,
+                "failures": result.failures,
+                "target_mode": result.target_mode,
+                "probe_definition_sha256": result.probe_definition_sha256,
+                "probe_sha256": result.probe_sha256,
+            },
+            sort_keys=True,
+        )
+    )
     if not result.passed:
         raise SystemExit(1)
 

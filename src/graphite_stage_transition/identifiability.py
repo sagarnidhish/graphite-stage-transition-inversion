@@ -107,6 +107,8 @@ def parameter_correlation(jacobian, relative_cutoff: float = 1e-10) -> np.ndarra
 
 
 def _residual_vector(problem: InverseProblem, unconstrained, max_residuals: int):
+    """Return the exact source residual or a deterministic reduced approximation."""
+
     residual = inverse_residual_vector(problem, unconstrained)
     if residual.shape[0] <= max_residuals:
         return residual
@@ -121,7 +123,7 @@ def residual_jacobian(
     optimum,
     max_residuals: int = 2048,
 ) -> np.ndarray:
-    """Differentiate the deterministic weighted morphology residual vector."""
+    """Differentiate the full residual or its deterministic capped approximation."""
 
     if max_residuals < 4:
         raise ValueError("max_residuals must be at least four")

@@ -1,7 +1,10 @@
+from types import SimpleNamespace
+
 import jax.numpy as jnp
 import numpy as np
 
 from graphite_stage_transition.identifiability import (
+    _residual_vector,
     fisher_spectrum,
     parameter_correlation,
     profile_likelihood,
@@ -52,3 +55,30 @@ def test_tiny_residual_jacobian_is_finite_and_has_four_columns():
     correlation = parameter_correlation(jacobian)
     assert correlation.shape == (4, 4)
     np.testing.assert_allclose(np.diag(correlation), 1.0, atol=1e-10)
+
+
+def test_identifiability_source_residual_matches_complete_objective(monkeypatch):
+    problem, _, _, near_truth, _ = make_tiny_inverse_problem()
+    predicted = jnp.where(
+        problem.grid.mask[None],
+        problem.observations + 0.55,
+        0.0,
+    )
+    predicted_mass = jnp.sum(predicted, axis=(1, 2)) * problem.grid.cell_area
+    monkeypatch.setattr(
+        "graphite_stage_transition.inversion.simulate",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            concentration=predicted,
+            mass=predicted_mass,
+        ),
+    )
+    values = problem.transform.to_unconstrained(near_truth)
+
+    residual = _residual_vector(problem, values, max_residuals=100_000)
+
+    np.testing.assert_allclose(
+        jnp.mean(residual**2),
+        problem.loss(values),
+        rtol=1e-12,
+        atol=1e-12,
+    )

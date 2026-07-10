@@ -5,10 +5,13 @@ import io
 import re
 import tarfile
 
+import pytest
+
 from graphite_stage_transition.benchmark import (
     BenchmarkExecution,
     aggregate_task_status,
     build_task_table,
+    require_all_tasks_succeeded,
     resume_benchmark,
     run_task,
     write_success_marker,
@@ -70,6 +73,7 @@ def test_resume_rejects_marker_from_different_execution(tmp_path: Path):
     task = build_task_table(_smoke_manifest(), methods=("chr",))[0]
     original = BenchmarkExecution(
         fingerprint_sha256="a" * 64,
+        canonical_environment_sha256="c" * 64,
         base_seed=20260710,
         starts=2,
         maxiter=4,
@@ -79,18 +83,19 @@ def test_resume_rejects_marker_from_different_execution(tmp_path: Path):
 
     assert resume_benchmark([task], tmp_path, execution=original) == []
     for changed in (
-        BenchmarkExecution("b" * 64, 20260710, 2, 4, False),
-        BenchmarkExecution("a" * 64, 20260711, 2, 4, False),
-        BenchmarkExecution("a" * 64, 20260710, 3, 4, False),
-        BenchmarkExecution("a" * 64, 20260710, 2, 5, False),
-        BenchmarkExecution("a" * 64, 20260710, 2, 4, True),
+        BenchmarkExecution("b" * 64, "c" * 64, 20260710, 2, 4, False),
+        BenchmarkExecution("a" * 64, "d" * 64, 20260710, 2, 4, False),
+        BenchmarkExecution("a" * 64, "c" * 64, 20260711, 2, 4, False),
+        BenchmarkExecution("a" * 64, "c" * 64, 20260710, 3, 4, False),
+        BenchmarkExecution("a" * 64, "c" * 64, 20260710, 2, 5, False),
+        BenchmarkExecution("a" * 64, "c" * 64, 20260710, 2, 4, True),
     ):
         assert resume_benchmark([task], tmp_path, execution=changed) == [task]
 
 
 def test_task_result_stamps_claim_eligibility(tmp_path, monkeypatch):
     task = build_task_table(_smoke_manifest(), methods=("chr",))[0]
-    execution = BenchmarkExecution("a" * 64, 20260710, 1, 1, False)
+    execution = BenchmarkExecution("a" * 64, "c" * 64, 20260710, 1, 1, False)
     monkeypatch.setattr(
         "graphite_stage_transition.benchmark._execute_task",
         lambda *_args, **_kwargs: {"method": "chr", "best": {"loss": 0.0}},
@@ -110,6 +115,15 @@ def test_task_result_stamps_claim_eligibility(tmp_path, monkeypatch):
     )
     assert succeeded
     assert result["claim_eligible"] is False
+
+
+def test_worker_outcome_check_raises_if_any_task_failed():
+    with pytest.raises(RuntimeError, match="task_b"):
+        require_all_tasks_succeeded((("task_a", True), ("task_b", False)))
+
+
+def test_worker_outcome_check_accepts_all_successes():
+    require_all_tasks_succeeded((("task_a", True), ("task_b", True)))
 
 
 def test_gpu_payload_embeds_sources_manifest_and_selected_data(tmp_path: Path):

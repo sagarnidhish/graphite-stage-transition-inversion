@@ -1,4 +1,5 @@
-from dataclasses import replace
+import json
+from dataclasses import asdict, replace
 from types import SimpleNamespace
 
 import jax
@@ -8,6 +9,7 @@ import numpy as np
 from graphite_stage_transition.config import GridConfig, SolverConfig
 from graphite_stage_transition.geometry import make_circle_grid
 from graphite_stage_transition.inversion import (
+    FitResult,
     InverseProblem,
     LossComponents,
     ParameterTransform,
@@ -144,6 +146,35 @@ def test_inverse_residual_vector_is_zero_at_generating_parameters():
     np.testing.assert_allclose(residual, 0.0, atol=1e-12)
 
 
+def test_inverse_residual_mean_square_matches_full_primary_objective(monkeypatch):
+    problem, _, _, near_truth, _ = make_tiny_inverse_problem()
+    predicted = jnp.where(
+        problem.grid.mask[None],
+        problem.observations + 0.55,
+        0.0,
+    )
+    predicted_mass = jnp.sum(predicted, axis=(1, 2)) * problem.grid.cell_area
+    monkeypatch.setattr(
+        "graphite_stage_transition.inversion.simulate",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            concentration=predicted,
+            mass=predicted_mass,
+        ),
+    )
+    values = TRANSFORM.to_unconstrained(near_truth)
+
+    components = problem.components(values)
+    residual = inverse_residual_vector(problem, values)
+
+    assert float(components.bounds) > 0.0
+    np.testing.assert_allclose(
+        jnp.mean(residual**2),
+        components.total,
+        rtol=1e-12,
+        atol=1e-12,
+    )
+
+
 def test_tiny_clean_observable_fit_recovers_two_strong_groups():
     problem, _, truth_groups, near_truth, displaced = make_tiny_inverse_problem()
 
@@ -190,7 +221,9 @@ def test_fit_reuses_components_from_final_objective_evaluation(monkeypatch):
 
     problem = CountingProblem()
     initial = CHRParameters(0.1, 0.7, 0.0012, 0.2, 0.5, 1.0)
-    monkeypatch.setattr("graphite_stage_transition.inversion.jax.jit", lambda function: function)
+    monkeypatch.setattr(
+        "graphite_stage_transition.inversion.jax.jit", lambda function: function
+    )
     monkeypatch.setattr(
         "graphite_stage_transition.inversion.minimize",
         single_evaluation_minimize,
@@ -201,6 +234,160 @@ def test_fit_reuses_components_from_final_objective_evaluation(monkeypatch):
     assert problem.calls == 1
     assert result.forward_solves == 1
     assert result.components["movie"] == 0.0
+
+
+def test_nonfinite_evaluation_permanently_fails_start(monkeypatch):
+    target = jnp.log(jnp.asarray([0.02, 0.7, 0.0012, 0.2]))
+
+    class RecoveringProblem:
+        transform = TRANSFORM
+        grid = SimpleNamespace(dx=1.0, mask=np.ones((1, 1), dtype=bool))
+
+        @staticmethod
+        def components(values):
+            finite_loss = jnp.sum((values - target) ** 2)
+            total = jnp.where(values[0] > -3.0, jnp.nan, finite_loss)
+            zero = jnp.asarray(0.0)
+            return LossComponents(total, zero, zero, zero, finite_loss, zero, zero)
+
+    def recovering_minimize(objective, values, **_kwargs):
+        objective(values)
+        candidate = np.asarray(target)
+        value, gradient = objective(candidate)
+        return SimpleNamespace(
+            x=candidate,
+            fun=value,
+            jac=gradient,
+            success=True,
+            message="converged",
+            nit=1,
+        )
+
+    monkeypatch.setattr(
+        "graphite_stage_transition.inversion.jax.jit", lambda function: function
+    )
+    monkeypatch.setattr(
+        "graphite_stage_transition.inversion.minimize",
+        recovering_minimize,
+    )
+    initial = CHRParameters(0.1, 0.7, 0.0012, 0.2, 0.5, 1.0)
+
+    result = fit_single_start(RecoveringProblem(), initial, maxiter=2)
+
+    assert not result.success
+    assert "nonfinite" in result.status
+    assert np.isfinite(result.loss)
+
+
+def test_nonfinite_final_components_are_strict_json_compatible(monkeypatch):
+    class NonfiniteProblem:
+        transform = TRANSFORM
+        grid = SimpleNamespace(dx=1.0, mask=np.ones((1, 1), dtype=bool))
+
+        @staticmethod
+        def components(_values):
+            nan = jnp.asarray(jnp.nan)
+            return LossComponents(nan, nan, nan, nan, nan, nan, nan)
+
+    def single_evaluation_minimize(objective, values, **_kwargs):
+        value, gradient = objective(values)
+        return SimpleNamespace(
+            x=np.asarray(values),
+            fun=value,
+            jac=gradient,
+            success=True,
+            message="converged",
+            nit=0,
+        )
+
+    monkeypatch.setattr(
+        "graphite_stage_transition.inversion.jax.jit", lambda function: function
+    )
+    monkeypatch.setattr(
+        "graphite_stage_transition.inversion.minimize",
+        single_evaluation_minimize,
+    )
+    initial = CHRParameters(0.1, 0.7, 0.0012, 0.2, 0.5, 1.0)
+
+    result = fit_single_start(NonfiniteProblem(), initial, maxiter=1)
+
+    assert not result.success
+    json.dumps(asdict(result), allow_nan=False)
+
+
+def test_nonfinite_gradient_fails_start(monkeypatch):
+    class NonfiniteGradientProblem:
+        transform = TRANSFORM
+        grid = SimpleNamespace(dx=1.0, mask=np.ones((1, 1), dtype=bool))
+
+        @staticmethod
+        def components(values):
+            total = jnp.sqrt(values[0] - values[0])
+            zero = jnp.asarray(0.0)
+            return LossComponents(total, zero, zero, zero, zero, zero, zero)
+
+    def single_evaluation_minimize(objective, values, **_kwargs):
+        value, gradient = objective(values)
+        assert np.isfinite(value)
+        return SimpleNamespace(
+            x=np.asarray(values),
+            fun=value,
+            jac=gradient,
+            success=True,
+            message="converged",
+            nit=0,
+        )
+
+    monkeypatch.setattr("graphite_stage_transition.inversion.jax.jit", lambda function: function)
+    monkeypatch.setattr(
+        "graphite_stage_transition.inversion.minimize",
+        single_evaluation_minimize,
+    )
+    initial = CHRParameters(0.1, 0.7, 0.0012, 0.2, 0.5, 1.0)
+
+    result = fit_single_start(NonfiniteGradientProblem(), initial, maxiter=1)
+
+    assert not result.success
+    assert "nonfinite" in result.status
+
+
+def test_multistart_excludes_failed_finite_result(monkeypatch):
+    def result(initial, *, loss, success):
+        return FitResult(
+            parameters={"mobility": float(initial.mobility)},
+            groups={},
+            loss=loss,
+            components={},
+            gradient_norm=0.0,
+            steps=0,
+            forward_solves=1,
+            status="converged" if success else "failed: nonfinite evaluation",
+            success=success,
+            runtime_seconds=0.0,
+            initial_parameters={"mobility": float(initial.mobility)},
+        )
+
+    failed_start = CHRParameters(0.05, 0.7, 0.0012, 0.2, 0.5, 1.0)
+    successful_start = CHRParameters(0.1, 0.7, 0.0012, 0.2, 0.5, 1.0)
+
+    def fake_fit(_problem, initial, _maxiter):
+        if initial is failed_start:
+            return result(initial, loss=0.0, success=False)
+        return result(initial, loss=1.0, success=True)
+
+    monkeypatch.setattr(
+        "graphite_stage_transition.inversion.fit_single_start",
+        fake_fit,
+    )
+
+    fitted = fit_multistart(
+        object(),
+        starts=[failed_start, successful_start],
+        maxiter=1,
+    )
+
+    assert fitted.best.success
+    assert fitted.best.loss == 1.0
 
 
 def test_reaction_scale_changes_spatial_field_while_preserving_total_current():

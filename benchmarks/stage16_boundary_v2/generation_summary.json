@@ -1,0 +1,8 @@
+{
+  "case_split_counts": {
+    "development": 10,
+    "test": 3,
+    "validation": 3
+  },
+  "records": 64
+}

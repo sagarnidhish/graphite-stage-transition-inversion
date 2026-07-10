@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+import hashlib
 import json
 from itertools import combinations
 from pathlib import Path
@@ -12,8 +13,22 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 
 
-PROBE_SCHEMA_VERSION = 1
-GATE_SCHEMA_VERSION = 1
+PROBE_SCHEMA_VERSION = 2
+GATE_SCHEMA_VERSION = 2
+
+ANALYTIC_TARGET_MODE = "analytic_charge_consistent"
+PROBE_DEFINITION_SCHEMA = (
+    "graphite-stage-transition-backend-probe-v2|clean-development-cases|"
+    "manifest-case-parameters|analytic-charge-consistent-target|"
+    "physics-observables-v1|primary-objective-gradient"
+)
+PROBE_DEFINITION_SHA256 = hashlib.sha256(
+    PROBE_DEFINITION_SCHEMA.encode("ascii")
+).hexdigest()
+_BACKEND_KINDS = frozenset(("canonical_cpu", "gpu"))
+_METRIC_SECTIONS = frozenset(
+    ("observable_block_rms", "primary_objective", "gradient")
+)
 
 
 @dataclass(frozen=True)
@@ -154,7 +169,10 @@ class BackendProbe:
     """Serializable evidence produced by one named numerical backend."""
 
     backend: str
+    backend_kind: str
     fingerprint_sha256: str
+    target_mode: str
+    probe_definition_sha256: str
     cases: tuple[ProbeCase, ...]
     metadata: Mapping[str, Any]
     schema_version: int = PROBE_SCHEMA_VERSION
@@ -164,6 +182,14 @@ class BackendProbe:
             raise ValueError(f"unsupported probe schema version {self.schema_version}")
         if not self.backend or not self.fingerprint_sha256:
             raise ValueError("backend and fingerprint_sha256 must be nonempty")
+        if self.backend_kind not in _BACKEND_KINDS:
+            raise ValueError(
+                "backend_kind must be either 'canonical_cpu' or 'gpu'"
+            )
+        if not self.target_mode:
+            raise ValueError("target_mode must be nonempty")
+        if not _is_sha256(self.probe_definition_sha256):
+            raise ValueError("probe_definition_sha256 must be a lowercase SHA-256")
         cases = tuple(self.cases)
         if not cases:
             raise ValueError("backend probe must contain at least one case")
@@ -181,6 +207,10 @@ class BackendGateResult:
     passed: bool
     fingerprint_sha256: str | None
     probe_backends: tuple[str, ...]
+    backend_kinds: Mapping[str, str]
+    target_mode: str | None
+    probe_definition_sha256: str | None
+    probe_sha256: Mapping[str, str]
     thresholds: Mapping[str, float]
     metrics: Mapping[str, Any]
     failures: tuple[str, ...]
@@ -190,9 +220,77 @@ class BackendGateResult:
         if self.schema_version != GATE_SCHEMA_VERSION:
             raise ValueError(f"unsupported gate schema version {self.schema_version}")
         object.__setattr__(self, "probe_backends", tuple(self.probe_backends))
+        object.__setattr__(self, "backend_kinds", dict(self.backend_kinds))
+        object.__setattr__(self, "probe_sha256", dict(self.probe_sha256))
         object.__setattr__(self, "thresholds", dict(self.thresholds))
         object.__setattr__(self, "metrics", dict(self.metrics))
         object.__setattr__(self, "failures", tuple(self.failures))
+        _validate_gate_result(self)
+
+
+def _is_sha256(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _validate_gate_result(result: BackendGateResult) -> None:
+    """Recheck every authorization invariant, including after in-memory mutation."""
+
+    if type(result.passed) is not bool:
+        raise ValueError("passed must be a boolean")
+    if any(not isinstance(failure, str) or not failure for failure in result.failures):
+        raise ValueError("failures must contain only nonempty strings")
+    if result.passed != (len(result.failures) == 0):
+        raise ValueError("passed must equal whether failures is empty")
+
+    backends = result.probe_backends
+    if (
+        len(backends) < 2
+        or len(backends) != len(set(backends))
+        or any(not isinstance(backend, str) or not backend for backend in backends)
+    ):
+        raise ValueError("gate requires at least two distinct backends")
+    backend_set = set(backends)
+    if set(result.backend_kinds) != backend_set:
+        raise ValueError("backend_kinds must cover exactly the probe backends")
+    if any(kind not in _BACKEND_KINDS for kind in result.backend_kinds.values()):
+        raise ValueError("backend_kinds contains an unsupported backend kind")
+    if set(result.probe_sha256) != backend_set or any(
+        not _is_sha256(digest) for digest in result.probe_sha256.values()
+    ):
+        raise ValueError(
+            "probe_sha256 must contain one valid evidence hash per backend"
+        )
+
+    if not isinstance(result.thresholds, Mapping):
+        raise ValueError("thresholds must be a mapping")
+    if set(result.metrics) != _METRIC_SECTIONS:
+        raise ValueError("metrics must contain every required metric section")
+    if any(not isinstance(result.metrics[name], Mapping) for name in _METRIC_SECTIONS):
+        raise ValueError("metric sections must be mappings")
+
+    if result.passed:
+        if not isinstance(result.fingerprint_sha256, str) or not result.fingerprint_sha256:
+            raise ValueError("passed gate requires a nonnull fingerprint")
+        kinds = tuple(result.backend_kinds.values())
+        if kinds.count("canonical_cpu") != 1:
+            raise ValueError("passed gate requires exactly one canonical_cpu backend")
+        if "gpu" not in kinds:
+            raise ValueError("passed gate requires at least one gpu backend")
+        if not result.target_mode:
+            raise ValueError("passed gate requires a nonempty target mode")
+        if not _is_sha256(result.probe_definition_sha256):
+            raise ValueError("passed gate requires a valid probe definition SHA-256")
+        if dict(result.thresholds) != asdict(DEFAULT_THRESHOLDS):
+            raise ValueError("passed gate requires the frozen thresholds")
+        if any(not result.metrics[name] for name in _METRIC_SECTIONS):
+            raise ValueError("passed gate requires nonempty complete metric sections")
+        metric_case_sets = [set(result.metrics[name]) for name in _METRIC_SECTIONS]
+        if any(case_ids != metric_case_sets[0] for case_ids in metric_case_sets[1:]):
+            raise ValueError("passed gate metric sections must cover the same cases")
 
 
 def load_backend_gate_thresholds(path: Path) -> BackendGateThresholds:
@@ -211,7 +309,10 @@ def _probe_to_dict(probe: BackendProbe) -> dict[str, Any]:
     return {
         "schema_version": probe.schema_version,
         "backend": probe.backend,
+        "backend_kind": probe.backend_kind,
         "fingerprint_sha256": probe.fingerprint_sha256,
+        "target_mode": probe.target_mode,
+        "probe_definition_sha256": probe.probe_definition_sha256,
         "cases": [asdict(case) for case in probe.cases],
         "metadata": dict(probe.metadata),
     }
@@ -241,11 +342,24 @@ def load_backend_probe(path: Path) -> BackendProbe:
     cases = tuple(ProbeCase(**case) for case in payload["cases"])
     return BackendProbe(
         backend=payload["backend"],
+        backend_kind=payload["backend_kind"],
         fingerprint_sha256=payload["fingerprint_sha256"],
+        target_mode=payload["target_mode"],
+        probe_definition_sha256=payload["probe_definition_sha256"],
         cases=cases,
         metadata=payload.get("metadata", {}),
         schema_version=payload["schema_version"],
     )
+
+
+def _probe_evidence_sha256(probe: BackendProbe) -> str:
+    encoded = json.dumps(
+        _probe_to_dict(probe),
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("ascii")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _case_map(probe: BackendProbe) -> dict[str, ProbeCase]:
@@ -274,10 +388,42 @@ def compare_backend_probes(
         raise ValueError("backend names must be unique within one gate comparison")
 
     failures: list[str] = []
+    if thresholds != DEFAULT_THRESHOLDS:
+        failures.append("backend gate did not use the frozen thresholds")
     fingerprints = {probe.fingerprint_sha256 for probe in probes}
     fingerprint = next(iter(fingerprints)) if len(fingerprints) == 1 else None
     if fingerprint is None:
         failures.append("probe execution fingerprint mismatch")
+
+    backend_kinds = {probe.backend: probe.backend_kind for probe in probes}
+    kinds = tuple(backend_kinds.values())
+    if kinds.count("canonical_cpu") != 1:
+        failures.append("backend gate requires exactly one canonical_cpu backend")
+    if "gpu" not in kinds:
+        failures.append("backend gate requires at least one gpu backend")
+    for probe in probes:
+        runtime_backend = probe.metadata.get("jax_default_backend")
+        expected_runtime = "cpu" if probe.backend_kind == "canonical_cpu" else "gpu"
+        devices = probe.metadata.get("devices")
+        if runtime_backend != expected_runtime or not isinstance(devices, (list, tuple)) or not devices:
+            failures.append(
+                f"{probe.backend}: backend kind is not backed by runtime metadata"
+            )
+        if probe.metadata.get("target") != probe.target_mode:
+            failures.append(
+                f"{probe.backend}: target mode is not backed by probe metadata"
+            )
+
+    target_modes = {probe.target_mode for probe in probes}
+    target_mode = next(iter(target_modes)) if len(target_modes) == 1 else None
+    if target_mode is None:
+        failures.append("probe target mode mismatch")
+    probe_definitions = {probe.probe_definition_sha256 for probe in probes}
+    probe_definition = (
+        next(iter(probe_definitions)) if len(probe_definitions) == 1 else None
+    )
+    if probe_definition is None:
+        failures.append("probe definition mismatch")
 
     reference_ids = tuple(case.case_id for case in probes[0].cases)
     if any(tuple(case.case_id for case in probe.cases) != reference_ids for probe in probes[1:]):
@@ -391,6 +537,12 @@ def compare_backend_probes(
         passed=not failures,
         fingerprint_sha256=fingerprint,
         probe_backends=backends,
+        backend_kinds=backend_kinds,
+        target_mode=target_mode,
+        probe_definition_sha256=probe_definition,
+        probe_sha256={
+            probe.backend: _probe_evidence_sha256(probe) for probe in probes
+        },
         thresholds=asdict(thresholds),
         metrics=metrics,
         failures=tuple(failures),
@@ -406,31 +558,49 @@ def save_backend_gate_result(result: BackendGateResult, path: Path) -> None:
 def load_backend_gate_result(path: Path) -> BackendGateResult:
     """Load a gate result, preserving its immutable authorization fields."""
 
-    payload = json.loads(Path(path).read_text(encoding="ascii"))
-    return BackendGateResult(**payload)
+    try:
+        payload = json.loads(Path(path).read_text(encoding="ascii"))
+        if not isinstance(payload, dict):
+            raise TypeError("top-level JSON must be an object")
+        return BackendGateResult(**payload)
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+        raise ValueError(f"invalid backend gate result: {error}") from error
 
 
 def require_matching_passed_gate(
     result: BackendGateResult,
     fingerprint_sha256: str,
+    *,
+    expected_target_mode: str = ANALYTIC_TARGET_MODE,
+    expected_probe_definition_sha256: str = PROBE_DEFINITION_SHA256,
 ) -> None:
     """Reject a failed or stale gate before claim-eligible model execution."""
 
-    if not result.passed:
-        raise ValueError("backend gate did not pass")
+    _validate_gate_result(result)
     if dict(result.thresholds) != asdict(DEFAULT_THRESHOLDS):
         raise ValueError("backend gate did not use the frozen thresholds")
+    if not result.passed:
+        raise ValueError("backend gate did not pass")
     if result.fingerprint_sha256 != fingerprint_sha256:
         raise ValueError("backend gate fingerprint does not match execution fingerprint")
+    if result.target_mode != expected_target_mode:
+        raise ValueError("backend gate target mode does not match required target mode")
+    if result.probe_definition_sha256 != expected_probe_definition_sha256:
+        raise ValueError(
+            "backend gate probe definition does not match required probe definition"
+        )
 
 
 __all__ = [
+    "ANALYTIC_TARGET_MODE",
     "analytic_reference_movie",
     "BackendGateResult",
     "BackendGateThresholds",
     "BackendProbe",
     "DEFAULT_THRESHOLDS",
     "ProbeCase",
+    "PROBE_DEFINITION_SCHEMA",
+    "PROBE_DEFINITION_SHA256",
     "compare_backend_probes",
     "load_backend_gate_result",
     "load_backend_gate_thresholds",

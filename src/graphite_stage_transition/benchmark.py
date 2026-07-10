@@ -39,10 +39,19 @@ class BenchmarkExecution:
     """Claim-relevant controls that must match before a result is reusable."""
 
     fingerprint_sha256: str
+    canonical_environment_sha256: str
     base_seed: int
     starts: int
     maxiter: int
     claim_eligible: bool
+
+
+def require_all_tasks_succeeded(outcomes) -> None:
+    """Raise so a worker process exits nonzero after any task failure."""
+
+    failed = [task_id for task_id, succeeded in outcomes if not succeeded]
+    if failed:
+        raise RuntimeError(f"benchmark tasks failed: {', '.join(failed)}")
 
 
 def _execution_record(
@@ -329,7 +338,7 @@ def run_task(
         )
         result_path = temporary / "result.json"
         result_path.write_text(
-            json.dumps(result, indent=2, sort_keys=True, allow_nan=True) + "\n",
+            json.dumps(result, indent=2, sort_keys=True, allow_nan=False) + "\n",
             encoding="ascii",
         )
         marker = {"task_id": task.task_id, "result_sha256": _sha256(result_path)}

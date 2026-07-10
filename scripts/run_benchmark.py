@@ -30,21 +30,29 @@ def _worker_main(worker_index, core_ids, cache_root, payloads) -> None:
     from graphite_stage_transition.benchmark import (
         BenchmarkExecution,
         BenchmarkTask,
+        require_all_tasks_succeeded,
         run_task,
     )
 
+    outcomes = []
     for payload in payloads:
         task = BenchmarkTask(**payload["task"])
         execution = BenchmarkExecution(**payload["execution"])
         print(f"[{worker_index}] {task.task_id} {task.method}", flush=True)
-        run_task(
-            task,
-            Path(payload["manifest_path"]),
-            Path(payload["output_root"]),
-            starts=execution.starts,
-            maxiter=execution.maxiter,
-            execution=execution,
+        outcomes.append(
+            (
+                task.task_id,
+                run_task(
+                    task,
+                    Path(payload["manifest_path"]),
+                    Path(payload["output_root"]),
+                    starts=execution.starts,
+                    maxiter=execution.maxiter,
+                    execution=execution,
+                ),
+            )
         )
+    require_all_tasks_succeeded(outcomes)
 
 
 def _run_spawned(payloads, cache_root, workers, cores_per_worker) -> None:
@@ -97,6 +105,13 @@ def main() -> None:
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
 
+    project_root = Path(__file__).resolve().parents[1]
+    python_version_path = project_root / ".python-version"
+    requirements_path = project_root / "requirements" / "canonical-cpu.txt"
+    from graphite_stage_transition.execution import validate_canonical_environment
+
+    validate_canonical_environment(python_version_path, requirements_path)
+
     # These imports initialize JAX in the parent only. Spawn workers import this
     # script without entering main, then set affinity before importing the model.
     from graphite_stage_transition.benchmark import (
@@ -127,7 +142,6 @@ def main() -> None:
     selected_manifest["records"] = selected_records
     tasks = build_task_table(selected_manifest, tuple(args.methods))
 
-    project_root = Path(__file__).resolve().parents[1]
     configured = Path(manifest["metadata"]["config_path"])
     config_candidates = (
         configured,
@@ -143,7 +157,8 @@ def main() -> None:
         source_root=project_root / "src" / "graphite_stage_transition",
         manifest_path=args.manifest,
         config_path=config_path,
-        requirements_path=project_root / "requirements" / "canonical-cpu.txt",
+        requirements_path=requirements_path,
+        python_version_path=python_version_path,
         observable_schema=OBSERVABLE_SCHEMA,
         optimizer={"starts": args.starts, "maxiter": args.maxiter},
         seed_policy=SEED_POLICY,
@@ -166,6 +181,7 @@ def main() -> None:
             claim_eligible = True
     execution = BenchmarkExecution(
         fingerprint_sha256=fingerprint["fingerprint_sha256"],
+        canonical_environment_sha256=fingerprint["canonical_environment_sha256"],
         base_seed=args.base_seed,
         starts=args.starts,
         maxiter=args.maxiter,

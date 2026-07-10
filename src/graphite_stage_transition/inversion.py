@@ -167,7 +167,7 @@ def loss_components(problem: InverseProblem, unconstrained) -> LossComponents:
 
 
 def inverse_residual_vector(problem: InverseProblem, unconstrained) -> jax.Array:
-    """Return the exact weighted morphology residual used by inversion."""
+    """Return residuals whose mean square is the complete primary objective."""
 
     parameters = problem.transform.from_unconstrained(unconstrained)
     prediction = simulate(
@@ -184,7 +184,28 @@ def inverse_residual_vector(problem: InverseProblem, unconstrained) -> jax.Array
         problem.transform.stage2,
         problem.transform.stage1,
     )
-    return observable_residual_vector(predicted, problem.observed_observables)
+    morphology = observable_residual_vector(predicted, problem.observed_observables)
+
+    width = problem.transform.stage1 - problem.transform.stage2
+    below = jax.nn.relu(problem.transform.stage2 - prediction.concentration)
+    above = jax.nn.relu(prediction.concentration - problem.transform.stage1)
+    spatial_size = int(np.prod(problem.grid.mask.shape))
+    active_indices = jnp.asarray(
+        np.flatnonzero(np.asarray(problem.grid.mask).reshape(-1)),
+        dtype=jnp.int32,
+    )
+    bound_violations = jnp.take(
+        (below + above).reshape((-1, spatial_size)),
+        active_indices,
+        axis=1,
+    ).reshape(-1) / width
+
+    total_size = morphology.size + bound_violations.size
+    morphology = morphology * jnp.sqrt(total_size / morphology.size)
+    bound_violations = bound_violations * jnp.sqrt(
+        problem.bound_penalty * total_size / bound_violations.size
+    )
+    return jnp.concatenate((morphology, bound_violations))
 
 
 def centered_finite_difference(function, values, step: float = 1e-4) -> np.ndarray:
@@ -216,7 +237,7 @@ class FitResult:
     parameters: dict[str, float]
     groups: dict[str, float]
     loss: float
-    components: dict[str, float]
+    components: dict[str, float | None]
     gradient_norm: float
     steps: int
     forward_solves: int
@@ -255,14 +276,16 @@ def fit_single_start(
     )
     evaluations = 0
     last_evaluation = None
+    encountered_nonfinite = False
 
     def scipy_objective(values):
-        nonlocal evaluations, last_evaluation
+        nonlocal evaluations, last_evaluation, encountered_nonfinite
         (value, components), gradient = objective_and_gradient(jnp.asarray(values))
         evaluations += 1
         value_float = float(value)
         gradient_array = np.asarray(gradient, dtype=np.float64)
         if not np.isfinite(value_float) or not np.all(np.isfinite(gradient_array)):
+            encountered_nonfinite = True
             value_float = 1e30
             gradient_array = np.zeros_like(values)
         last_evaluation = (
@@ -293,16 +316,28 @@ def fit_single_start(
             parameters, problem.grid.dx * problem.grid.mask.shape[0]
         ).items()
     }
+
+    def finite_component(value) -> float | None:
+        converted = float(value)
+        return converted if np.isfinite(converted) else None
+
     component_values = {
-        "radial": float(components.radial),
-        "structure": float(components.structure),
-        "boundary": float(components.boundary),
-        "movie": float(components.movie),
-        "mass": float(components.mass),
-        "bounds": float(components.bounds),
+        "radial": finite_component(components.radial),
+        "structure": finite_component(components.structure),
+        "boundary": finite_component(components.boundary),
+        "movie": finite_component(components.movie),
+        "mass": finite_component(components.mass),
+        "bounds": finite_component(components.bounds),
     }
-    success = bool(optimized.success and np.isfinite(final_value))
-    status = "converged" if success else f"failed: {optimized.message}"
+    success = bool(
+        optimized.success
+        and np.isfinite(final_value)
+        and not encountered_nonfinite
+    )
+    if encountered_nonfinite:
+        status = "failed: nonfinite objective or gradient evaluation"
+    else:
+        status = "converged" if success else f"failed: {optimized.message}"
     return FitResult(
         parameters=_parameter_dict(parameters),
         groups=groups,
@@ -328,10 +363,12 @@ def fit_multistart(
     if not starts:
         raise ValueError("at least one inversion start is required")
     results = tuple(fit_single_start(problem, start, maxiter) for start in starts)
-    finite = [result for result in results if np.isfinite(result.loss)]
-    if not finite:
-        raise RuntimeError("all inversion starts returned nonfinite losses")
-    return MultistartResult(min(finite, key=lambda result: result.loss), results)
+    successful = [
+        result for result in results if result.success and np.isfinite(result.loss)
+    ]
+    if not successful:
+        raise RuntimeError("all inversion starts failed or returned nonfinite losses")
+    return MultistartResult(min(successful, key=lambda result: result.loss), results)
 
 
 def generate_starts(

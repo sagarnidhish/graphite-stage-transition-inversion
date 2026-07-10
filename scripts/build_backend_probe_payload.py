@@ -73,7 +73,9 @@ subprocess.run([
     "--manifest", str(ROOT / "benchmark" / "manifest.json"),
     "--fingerprint", str(ROOT / "execution.json"),
     "--backend-name", "{args.backend_name}",
+    "--backend-kind", "gpu",
     "--max-cases", "{args.max_cases}",
+    "--analytic-targets",
     "--out", str(output),
 ], check=True, cwd=ROOT)
 print(f"BACKEND_PROBE={{output}}", flush=True)

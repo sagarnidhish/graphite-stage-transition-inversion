@@ -19,13 +19,19 @@ import jax.numpy as jnp
 import numpy as np
 
 from graphite_stage_transition.backend_gate import (
+    ANALYTIC_TARGET_MODE,
     BackendProbe,
     ProbeCase,
+    PROBE_DEFINITION_SHA256,
     analytic_reference_movie,
     save_backend_probe,
 )
 from graphite_stage_transition.config import load_config
 from graphite_stage_transition.geometry import make_circle_grid
+from graphite_stage_transition.execution import (
+    validate_canonical_environment,
+    verify_execution_fingerprint,
+)
 from graphite_stage_transition.inversion import ParameterTransform
 from graphite_stage_transition.observables import (
     make_observable_geometry,
@@ -52,19 +58,6 @@ def _resolve_config_path(manifest_path: Path, manifest: dict) -> Path:
         return next(path for path in candidates if path.is_file())
     except StopIteration as error:
         raise FileNotFoundError(f"cannot resolve benchmark config {configured}") from error
-
-
-def _load_fingerprint(path: Path) -> str:
-    payload = json.loads(Path(path).read_text(encoding="ascii"))
-    candidates = (
-        payload.get("fingerprint_sha256"),
-        payload.get("fingerprint", {}).get("fingerprint_sha256"),
-        payload.get("execution", {}).get("fingerprint_sha256"),
-    )
-    try:
-        return next(str(value) for value in candidates if value)
-    except StopIteration as error:
-        raise ValueError("fingerprint JSON does not contain fingerprint_sha256") from error
 
 
 def _development_cases(manifest: dict, maximum: int) -> list[dict]:
@@ -201,16 +194,38 @@ def main() -> None:
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--fingerprint", type=Path, required=True)
     parser.add_argument("--backend-name", required=True)
+    parser.add_argument(
+        "--backend-kind",
+        choices=("canonical_cpu", "gpu"),
+        required=True,
+    )
     parser.add_argument("--max-cases", type=int, default=2)
     parser.add_argument("--analytic-targets", action="store_true")
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
     if args.max_cases < 1:
         parser.error("--max-cases must be positive")
+    if not args.analytic_targets:
+        parser.error("--analytic-targets is required by the frozen probe definition")
 
     manifest_path = args.manifest.resolve()
     manifest = json.loads(manifest_path.read_text(encoding="ascii"))
-    config = load_config(_resolve_config_path(manifest_path, manifest))
+    config_path = _resolve_config_path(manifest_path, manifest)
+    config = load_config(config_path)
+    project_root = Path(__file__).resolve().parents[1]
+    requirements_path = project_root / "requirements" / "canonical-cpu.txt"
+    python_version_path = project_root / ".python-version"
+    fingerprint_record = json.loads(args.fingerprint.read_text(encoding="ascii"))
+    fingerprint_sha256 = verify_execution_fingerprint(
+        fingerprint_record,
+        source_root=project_root / "src" / "graphite_stage_transition",
+        manifest_path=manifest_path,
+        config_path=config_path,
+        requirements_path=requirements_path,
+        python_version_path=python_version_path,
+    )
+    if args.backend_kind == "canonical_cpu":
+        validate_canonical_environment(python_version_path, requirements_path)
     records = _development_cases(manifest, args.max_cases)
     cases = []
     runtimes = {}
@@ -229,7 +244,10 @@ def main() -> None:
     devices = [str(device) for device in jax.devices()]
     probe = BackendProbe(
         backend=args.backend_name,
-        fingerprint_sha256=_load_fingerprint(args.fingerprint),
+        backend_kind=args.backend_kind,
+        fingerprint_sha256=fingerprint_sha256,
+        target_mode=ANALYTIC_TARGET_MODE,
+        probe_definition_sha256=PROBE_DEFINITION_SHA256,
         cases=tuple(cases),
         metadata={
             "jax": version("jax"),
@@ -240,7 +258,7 @@ def main() -> None:
             "devices": devices,
             "runtime_seconds": runtimes,
             "parameter_point": "manifest_case_parameters",
-            "target": "analytic_charge_consistent" if args.analytic_targets else "manifest_observation",
+            "target": ANALYTIC_TARGET_MODE,
             "parameter_order": list(PARAMETER_NAMES),
         },
     )

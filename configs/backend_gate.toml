@@ -5,3 +5,7 @@ objective_cv_max = 0.05
 gradient_cosine_min = 0.99
 gradient_norm_disagreement_max = 0.10
 gradient_small_norm = 1e-6
+
+[probe]
+target_mode = "analytic_charge_consistent"
+definition_sha256 = "4cc931992ff92321a5f9d9642795f31a8dac884bbd0670eafdde3927b5611ea1"
