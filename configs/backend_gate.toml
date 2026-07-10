@@ -1,0 +1,7 @@
+[thresholds]
+observable_block_rms_max = 0.02
+objective_range_max = 0.005
+objective_cv_max = 0.05
+gradient_cosine_min = 0.99
+gradient_norm_disagreement_max = 0.10
+gradient_small_norm = 1e-6

@@ -25,7 +25,7 @@ class Grid(NamedTuple):
 
 
 def _boundary_face_count(mask: jax.Array) -> jax.Array:
-    padded = jnp.pad(mask, 1, constant_values=False)
+    padded = jnp.pad(mask, 1, constant_values=False).astype(jnp.int32)
     neighbor_count = (
         padded[:-2, 1:-1]
         + padded[2:, 1:-1]
@@ -70,4 +70,3 @@ def radial_bin_indices(grid: Grid, bins: int) -> np.ndarray:
     indices = np.clip(indices, 0, bins - 1)
     indices[~np.asarray(grid.mask)] = -1
     return indices
-

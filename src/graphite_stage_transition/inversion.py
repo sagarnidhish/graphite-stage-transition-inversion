@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import time
 from typing import NamedTuple, Sequence
 
@@ -13,12 +13,22 @@ from scipy.optimize import minimize
 
 from .config import SolverConfig
 from .geometry import Grid
+from .observables import (
+    ObservableGeometry,
+    PhysicsObservables,
+    make_observable_geometry,
+    observable_residual_vector,
+    physics_observables,
+)
 from .protocols import Protocol
 from .solver import CHRParameters, simulate
 
 
 class LossComponents(NamedTuple):
     total: jax.Array
+    radial: jax.Array
+    structure: jax.Array
+    boundary: jax.Array
     movie: jax.Array
     mass: jax.Array
     bounds: jax.Array
@@ -73,7 +83,20 @@ class InverseProblem:
     initial_concentration: jax.Array
     transform: ParameterTransform
     mass_penalty: float = 1.0
-    bound_penalty: float = 1e-8
+    bound_penalty: float = 1e-4
+    observable_geometry: ObservableGeometry = field(init=False, repr=False, compare=False)
+    observed_observables: PhysicsObservables = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        geometry = make_observable_geometry(self.grid)
+        observed = physics_observables(
+            self.observations,
+            geometry,
+            self.transform.stage2,
+            self.transform.stage1,
+        )
+        object.__setattr__(self, "observable_geometry", geometry)
+        object.__setattr__(self, "observed_observables", observed)
 
     def components(self, unconstrained) -> LossComponents:
         return loss_components(self, unconstrained)
@@ -83,7 +106,7 @@ class InverseProblem:
 
 
 def loss_components(problem: InverseProblem, unconstrained) -> LossComponents:
-    """Evaluate normalized masked movie, mass, and weak physical-bound losses."""
+    """Evaluate primary morphology losses and zero-weight field diagnostics."""
 
     parameters = problem.transform.from_unconstrained(unconstrained)
     prediction = simulate(
@@ -93,6 +116,28 @@ def loss_components(problem: InverseProblem, unconstrained) -> LossComponents:
         problem.solver,
         initial_concentration=problem.initial_concentration,
         seed=problem.solver.seed,
+    )
+    predicted_observables = physics_observables(
+        prediction.concentration,
+        problem.observable_geometry,
+        problem.transform.stage2,
+        problem.transform.stage1,
+    )
+    residual = observable_residual_vector(
+        predicted_observables,
+        problem.observed_observables,
+    )
+    radial_loss = jnp.mean(
+        (predicted_observables.radial_profile - problem.observed_observables.radial_profile)
+        ** 2
+    )
+    structure_loss = jnp.mean(
+        (predicted_observables.structure_power - problem.observed_observables.structure_power)
+        ** 2
+    )
+    boundary_loss = jnp.mean(
+        (predicted_observables.boundary_excess - problem.observed_observables.boundary_excess)
+        ** 2
     )
     mask = problem.grid.mask[None, ...]
     width = problem.transform.stage1 - problem.transform.stage2
@@ -109,8 +154,37 @@ def loss_components(problem: InverseProblem, unconstrained) -> LossComponents:
     below = jax.nn.relu(problem.transform.stage2 - prediction.concentration)
     above = jax.nn.relu(prediction.concentration - problem.transform.stage1)
     bounds_loss = jnp.sum(jnp.where(mask, below**2 + above**2, 0.0)) / normalizer
-    total = movie_loss + problem.mass_penalty * mass_loss + problem.bound_penalty * bounds_loss
-    return LossComponents(total, movie_loss, mass_loss, bounds_loss)
+    total = jnp.mean(residual**2) + problem.bound_penalty * bounds_loss
+    return LossComponents(
+        total,
+        radial_loss,
+        structure_loss,
+        boundary_loss,
+        movie_loss,
+        mass_loss,
+        bounds_loss,
+    )
+
+
+def inverse_residual_vector(problem: InverseProblem, unconstrained) -> jax.Array:
+    """Return the exact weighted morphology residual used by inversion."""
+
+    parameters = problem.transform.from_unconstrained(unconstrained)
+    prediction = simulate(
+        problem.grid,
+        problem.protocol,
+        parameters,
+        problem.solver,
+        initial_concentration=problem.initial_concentration,
+        seed=problem.solver.seed,
+    )
+    predicted = physics_observables(
+        prediction.concentration,
+        problem.observable_geometry,
+        problem.transform.stage2,
+        problem.transform.stage1,
+    )
+    return observable_residual_vector(predicted, problem.observed_observables)
 
 
 def centered_finite_difference(function, values, step: float = 1e-4) -> np.ndarray:
@@ -220,6 +294,9 @@ def fit_single_start(
         ).items()
     }
     component_values = {
+        "radial": float(components.radial),
+        "structure": float(components.structure),
+        "boundary": float(components.boundary),
         "movie": float(components.movie),
         "mass": float(components.mass),
         "bounds": float(components.bounds),

@@ -18,6 +18,24 @@ class Protocol(NamedTuple):
     dt: float
 
 
+def _step_save_slots(save_indices: jax.Array | np.ndarray, steps: int) -> jax.Array:
+    """Map each completed solver step to its saved-state slot, or ``-1``."""
+
+    saves = np.asarray(save_indices)
+    if steps < 1:
+        raise ValueError("steps must be positive")
+    if saves.ndim != 1 or saves.size < 2 or saves.dtype != np.dtype(np.int32):
+        raise ValueError("save_indices must be a one-dimensional int32 array")
+    if saves[0] != 0 or saves[-1] != steps:
+        raise ValueError("save_indices must start at zero and end at steps")
+    if np.any(np.diff(saves) <= 0):
+        raise ValueError("save_indices must be strictly increasing")
+
+    slots = np.full((steps,), -1, dtype=np.int32)
+    slots[saves[1:] - 1] = np.arange(1, saves.size, dtype=np.int32)
+    return jnp.asarray(slots)
+
+
 def make_constant_protocol(current: float, steps: int, dt: float, save_every: int = 1) -> Protocol:
     """Construct a constant-current protocol with state-aligned save indices."""
 
@@ -27,7 +45,7 @@ def make_constant_protocol(current: float, steps: int, dt: float, save_every: in
     times = jnp.arange(steps + 1, dtype=jnp.float64) * dt
     saves = np.arange(0, steps + 1, save_every, dtype=np.int32)
     if saves[-1] != steps:
-        saves = np.append(saves, steps)
+        saves = np.append(saves, np.int32(steps)).astype(np.int32, copy=False)
     return Protocol(currents, times, jnp.asarray(saves), float(dt))
 
 
@@ -54,7 +72,6 @@ def build_protocol(config: ProtocolConfig, dt: float) -> Protocol:
     currents = np.concatenate(current_parts)
     saves = np.unique(np.asarray(save_indices, dtype=np.int32))
     if saves[-1] != len(currents):
-        saves = np.append(saves, len(currents))
+        saves = np.append(saves, np.int32(len(currents))).astype(np.int32, copy=False)
     times = np.arange(len(currents) + 1, dtype=np.float64) * dt
     return Protocol(jnp.asarray(currents), jnp.asarray(times), jnp.asarray(saves), float(dt))
-

@@ -16,6 +16,7 @@ import numpy as np
 
 from .baselines import mean_only_loss, simulate_fickian, simulate_sharp_interface, spatial_loss
 from .config import load_config
+from .execution import stable_task_seed
 from .geometry import make_circle_grid
 from .inversion import InverseProblem, ParameterTransform, fit_multistart, generate_starts
 from .protocols import build_protocol
@@ -31,6 +32,27 @@ class BenchmarkTask:
     noise_fraction: float
     split: str
     method: str
+
+
+@dataclass(frozen=True)
+class BenchmarkExecution:
+    """Claim-relevant controls that must match before a result is reusable."""
+
+    fingerprint_sha256: str
+    base_seed: int
+    starts: int
+    maxiter: int
+    claim_eligible: bool
+
+
+def _execution_record(
+    execution: BenchmarkExecution,
+    task: BenchmarkTask,
+) -> dict[str, int | str | bool]:
+    return {
+        **asdict(execution),
+        "seed": stable_task_seed(execution.base_seed, task.task_id),
+    }
 
 
 def _task_id(record: dict, method: str) -> str:
@@ -80,6 +102,7 @@ def write_success_marker(
     output_root: Path,
     task: BenchmarkTask,
     checksum: str | None = None,
+    execution: BenchmarkExecution | None = None,
 ) -> None:
     """Test/helper API that creates a checksum-bearing completed task."""
 
@@ -96,14 +119,21 @@ def write_success_marker(
         )
     actual = _sha256(result_path)
     marker_checksum = actual if checksum in (None, "valid") else checksum
+    marker = {"task_id": task.task_id, "result_sha256": marker_checksum}
+    if execution is not None:
+        marker["execution"] = _execution_record(execution, task)
     (directory / "success.json").write_text(
-        json.dumps({"task_id": task.task_id, "result_sha256": marker_checksum}, sort_keys=True)
+        json.dumps(marker, sort_keys=True)
         + "\n",
         encoding="ascii",
     )
 
 
-def _verified_success(output_root: Path, task: BenchmarkTask) -> bool:
+def _verified_success(
+    output_root: Path,
+    task: BenchmarkTask,
+    execution: BenchmarkExecution | None = None,
+) -> bool:
     directory = Path(output_root) / "tasks" / task.task_id
     marker_path = directory / "success.json"
     result_path = directory / "result.json"
@@ -115,21 +145,32 @@ def _verified_success(output_root: Path, task: BenchmarkTask) -> bool:
         stored_task = json.loads(task_path.read_text(encoding="ascii"))
     except (json.JSONDecodeError, OSError):
         return False
-    return (
+    valid = (
         marker.get("task_id") == task.task_id
         and stored_task == asdict(task)
         and marker.get("result_sha256") == _sha256(result_path)
     )
+    if execution is not None:
+        valid = valid and marker.get("execution") == _execution_record(execution, task)
+    return valid
 
 
-def resume_benchmark(tasks, output_root: Path) -> list[BenchmarkTask]:
-    return [task for task in tasks if not _verified_success(output_root, task)]
+def resume_benchmark(
+    tasks,
+    output_root: Path,
+    execution: BenchmarkExecution | None = None,
+) -> list[BenchmarkTask]:
+    return [task for task in tasks if not _verified_success(output_root, task, execution)]
 
 
-def aggregate_task_status(tasks, output_root: Path) -> dict[str, int]:
+def aggregate_task_status(
+    tasks,
+    output_root: Path,
+    execution: BenchmarkExecution | None = None,
+) -> dict[str, int]:
     counts = {"success": 0, "failed": 0, "pending": 0}
     for task in tasks:
-        if _verified_success(output_root, task):
+        if _verified_success(output_root, task, execution):
             counts["success"] += 1
         elif (Path(output_root) / "failures" / f"{task.task_id}.json").is_file():
             counts["failed"] += 1
@@ -256,9 +297,20 @@ def run_task(
     output_root: Path,
     starts: int,
     maxiter: int,
-    seed: int,
+    seed: int | None = None,
+    execution: BenchmarkExecution | None = None,
 ) -> bool:
     """Run one task atomically and retain explicit failure evidence."""
+
+    if execution is not None:
+        if starts != execution.starts or maxiter != execution.maxiter:
+            raise ValueError("task controls must match the execution fingerprint")
+        derived_seed = stable_task_seed(execution.base_seed, task.task_id)
+        if seed is not None and seed != derived_seed:
+            raise ValueError("explicit seed does not match stable task seed")
+        seed = derived_seed
+    if seed is None:
+        raise ValueError("seed or execution must be provided")
 
     output_root = Path(output_root)
     tasks_root = output_root / "tasks"
@@ -270,6 +322,7 @@ def run_task(
         result = _execute_task(task, Path(manifest_path), starts, maxiter, seed)
         result["task_id"] = task.task_id
         result["status"] = "success"
+        result["claim_eligible"] = bool(execution and execution.claim_eligible)
         result["runtime_seconds"] = time.perf_counter() - started
         (temporary / "task.json").write_text(
             json.dumps(asdict(task), sort_keys=True) + "\n", encoding="ascii"
@@ -279,11 +332,11 @@ def run_task(
             json.dumps(result, indent=2, sort_keys=True, allow_nan=True) + "\n",
             encoding="ascii",
         )
+        marker = {"task_id": task.task_id, "result_sha256": _sha256(result_path)}
+        if execution is not None:
+            marker["execution"] = _execution_record(execution, task)
         (temporary / "success.json").write_text(
-            json.dumps(
-                {"task_id": task.task_id, "result_sha256": _sha256(result_path)},
-                sort_keys=True,
-            )
+            json.dumps(marker, sort_keys=True)
             + "\n",
             encoding="ascii",
         )

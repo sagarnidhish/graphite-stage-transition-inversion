@@ -145,6 +145,15 @@ def simulate_fickian(
             maxiter=solver.cg_max_iterations,
         )
         next_concentration = jnp.where(grid.mask, next_concentration, 0.0)
+        mass_mode_correction = (
+            jnp.sum(jnp.where(grid.mask, right_hand_side - next_concentration, 0.0))
+            / grid.active_count
+        )
+        next_concentration = jnp.where(
+            grid.mask,
+            next_concentration + mass_mode_correction,
+            0.0,
+        )
         return next_concentration, next_concentration
 
     _, history = jax.lax.scan(step, initial_field, protocol.current)

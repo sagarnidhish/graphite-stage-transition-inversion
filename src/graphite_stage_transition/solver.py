@@ -12,7 +12,7 @@ from .config import SolverConfig
 from .free_energy import homogeneous_mu, total_free_energy
 from .geometry import Grid
 from .operators import masked_laplacian
-from .protocols import Protocol
+from .protocols import Protocol, _step_save_slots
 from .reaction import ReactionState, galvanostatic_reaction
 
 
@@ -186,33 +186,10 @@ def simulate(
         grid, parameters, solver, initial_concentration, run_seed
     )
 
-    def scan_step(concentration, target_current):
-        next_concentration, diagnostics = semi_implicit_step(
-            concentration, target_current, grid, parameters, solver
-        )
-        mass = particle_mass(next_concentration, grid)
-        energy = total_free_energy(
-            next_concentration,
-            grid,
-            parameters.barrier,
-            parameters.kappa,
-            parameters.stage2,
-            parameters.stage1,
-        )
-        outputs = (
-            next_concentration,
-            mass,
-            energy,
-            diagnostics.overpotential,
-            diagnostics.summed_current,
-            diagnostics.cg_residual,
-        )
-        return next_concentration, outputs
-
-    _, history = jax.lax.scan(jax.checkpoint(scan_step), initial, protocol.current)
-    concentrations, mass, energy, overpotential, summed_current, residual = history
-    all_concentrations = jnp.concatenate((initial[None, ...], concentrations), axis=0)
-    all_mass = jnp.concatenate((particle_mass(initial, grid)[None], mass))
+    save = protocol.save_indices
+    save_count = int(save.size)
+    save_slots = _step_save_slots(save, int(protocol.current.size))
+    initial_mass = particle_mass(initial, grid)
     initial_energy = total_free_energy(
         initial,
         grid,
@@ -221,20 +198,104 @@ def simulate(
         parameters.stage2,
         parameters.stage1,
     )
-    all_energy = jnp.concatenate((initial_energy[None], energy))
-    all_overpotential = jnp.concatenate((jnp.zeros((1,), dtype=jnp.float64), overpotential))
-    all_summed_current = jnp.concatenate((jnp.zeros((1,), dtype=jnp.float64), summed_current))
-    all_residual = jnp.concatenate((jnp.zeros((1,), dtype=jnp.float64), residual))
-    state_currents = jnp.concatenate((protocol.current[:1], protocol.current))
-    save = protocol.save_indices
+    saved_concentration = jnp.zeros(
+        (save_count, *initial.shape), dtype=initial.dtype
+    ).at[0].set(initial)
+    saved_mass = jnp.zeros((save_count,), dtype=jnp.float64).at[0].set(initial_mass)
+    saved_energy = jnp.zeros((save_count,), dtype=jnp.float64).at[0].set(initial_energy)
+    saved_overpotential = jnp.zeros((save_count,), dtype=jnp.float64)
+    saved_summed_current = jnp.zeros((save_count,), dtype=jnp.float64)
+    saved_residual = jnp.zeros((save_count,), dtype=jnp.float64)
+
+    def scan_step(carry, step_inputs):
+        (
+            concentration,
+            concentration_buffer,
+            mass_buffer,
+            energy_buffer,
+            overpotential_buffer,
+            summed_current_buffer,
+            residual_buffer,
+        ) = carry
+        target_current, save_slot = step_inputs
+        next_concentration, diagnostics = semi_implicit_step(
+            concentration, target_current, grid, parameters, solver
+        )
+
+        def save_outputs(buffers):
+            (
+                concentrations,
+                masses,
+                energies,
+                overpotentials,
+                summed_currents,
+                residuals,
+            ) = buffers
+            mass = particle_mass(next_concentration, grid)
+            energy = total_free_energy(
+                next_concentration,
+                grid,
+                parameters.barrier,
+                parameters.kappa,
+                parameters.stage2,
+                parameters.stage1,
+            )
+            return (
+                concentrations.at[save_slot].set(next_concentration),
+                masses.at[save_slot].set(mass),
+                energies.at[save_slot].set(energy),
+                overpotentials.at[save_slot].set(diagnostics.overpotential),
+                summed_currents.at[save_slot].set(diagnostics.summed_current),
+                residuals.at[save_slot].set(diagnostics.cg_residual),
+            )
+
+        buffers = jax.lax.cond(
+            save_slot >= 0,
+            save_outputs,
+            lambda current_buffers: current_buffers,
+            (
+                concentration_buffer,
+                mass_buffer,
+                energy_buffer,
+                overpotential_buffer,
+                summed_current_buffer,
+                residual_buffer,
+            ),
+        )
+        return (next_concentration, *buffers), None
+
+    initial_carry = (
+        initial,
+        saved_concentration,
+        saved_mass,
+        saved_energy,
+        saved_overpotential,
+        saved_summed_current,
+        saved_residual,
+    )
+    final_carry, _ = jax.lax.scan(
+        jax.checkpoint(scan_step),
+        initial_carry,
+        (protocol.current, save_slots),
+    )
+    (
+        _,
+        saved_concentration,
+        saved_mass,
+        saved_energy,
+        saved_overpotential,
+        saved_summed_current,
+        saved_residual,
+    ) = final_carry
+    state_currents = protocol.current[jnp.maximum(save - 1, 0)]
     return SimulationResult(
-        concentration=all_concentrations[save],
+        concentration=saved_concentration,
         times=protocol.times[save],
-        currents=state_currents[save],
-        mass=all_mass[save],
-        free_energy=all_energy[save],
-        overpotential=all_overpotential[save],
-        summed_current=all_summed_current[save],
-        cg_residual=all_residual[save],
+        currents=state_currents,
+        mass=saved_mass,
+        free_energy=saved_energy,
+        overpotential=saved_overpotential,
+        summed_current=saved_summed_current,
+        cg_residual=saved_residual,
         metadata={"seed": run_seed, "steps": int(protocol.current.size), "dt": solver.dt},
     )

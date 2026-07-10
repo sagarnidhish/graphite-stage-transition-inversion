@@ -44,6 +44,19 @@ class DeterminismGate:
 
 
 @dataclass(frozen=True)
+class FullCycleGate:
+    passed: bool
+    finite: bool
+    initial_mean: float
+    maximum_mean: float
+    final_mean: float
+    minimum_concentration: float
+    maximum_concentration: float
+    endpoint_tolerance: float
+    bound_tolerance: float
+
+
+@dataclass(frozen=True)
 class VerificationReport:
     mass_balance: MassBalanceGate
     relaxation: RelaxationGate
@@ -132,6 +145,59 @@ def verify_determinism(first, second) -> DeterminismGate:
     difference = np.abs(first_values - second_values)
     maximum = float(np.max(difference)) if difference.size else 0.0
     return DeterminismGate(bool(np.array_equal(first_values, second_values)), maximum)
+
+
+def verify_full_cycle_transition(
+    concentration,
+    mask,
+    stage2: float,
+    stage1: float,
+    endpoint_tolerance: float = 1e-8,
+    bound_tolerance: float = 0.05,
+) -> FullCycleGate:
+    """Require stage-2 start, stage-1 reach, stage-2 return, and bounded fields."""
+
+    values = np.asarray(concentration, dtype=np.float64)
+    active = np.asarray(mask, dtype=bool)
+    if (
+        values.ndim != 3
+        or values.shape[1:] != active.shape
+        or values.shape[0] < 2
+        or not np.any(active)
+        or not stage2 < stage1
+    ):
+        raise ValueError("invalid full-cycle transition inputs")
+    active_values = values[:, active]
+    finite = bool(np.all(np.isfinite(active_values)))
+    if finite:
+        means = np.mean(active_values, axis=1)
+        initial_mean = float(means[0])
+        maximum_mean = float(np.max(means))
+        final_mean = float(means[-1])
+        minimum = float(np.min(active_values))
+        maximum = float(np.max(active_values))
+        passed = (
+            abs(initial_mean - stage2) <= endpoint_tolerance
+            and abs(maximum_mean - stage1) <= endpoint_tolerance
+            and abs(final_mean - stage2) <= endpoint_tolerance
+            and minimum >= stage2 - bound_tolerance
+            and maximum <= stage1 + bound_tolerance
+        )
+    else:
+        initial_mean = maximum_mean = final_mean = float("nan")
+        minimum = maximum = float("nan")
+        passed = False
+    return FullCycleGate(
+        bool(passed),
+        finite,
+        initial_mean,
+        maximum_mean,
+        final_mean,
+        minimum,
+        maximum,
+        float(endpoint_tolerance),
+        float(bound_tolerance),
+    )
 
 
 def _front_radius(concentration: np.ndarray, grid: Grid, threshold: float) -> np.ndarray:

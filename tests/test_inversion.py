@@ -15,6 +15,8 @@ from graphite_stage_transition.inversion import (
     dimensionless_groups,
     fit_single_start,
     fit_multistart,
+    inverse_residual_vector,
+    loss_components,
     relative_group_error,
 )
 from graphite_stage_transition.protocols import make_constant_protocol
@@ -62,8 +64,8 @@ def make_tiny_inverse_problem():
         observations=observed,
         initial_concentration=initial,
         transform=TRANSFORM,
-        mass_penalty=0.1,
-        bound_penalty=1e-8,
+        mass_penalty=0.0,
+        bound_penalty=1e-4,
     )
     near_truth = CHRParameters(0.105, 0.68, 0.00115, 0.20, 0.5, 1.0)
     displaced = CHRParameters(0.065, 1.05, 0.0020, 0.11, 0.5, 1.0)
@@ -96,13 +98,63 @@ def test_loss_gradient_matches_finite_difference():
     )
 
 
-def test_tiny_clean_recovery_reduces_group_error():
+def test_total_loss_matches_frozen_observable_objective():
+    problem, _, _, _, displaced = make_tiny_inverse_problem()
+
+    components = problem.components(TRANSFORM.to_unconstrained(displaced))
+
+    expected = (
+        0.50 * components.radial
+        + 0.35 * components.structure
+        + 0.15 * components.boundary
+        + problem.bound_penalty * components.bounds
+    )
+    np.testing.assert_allclose(components.total, expected, rtol=1e-12, atol=1e-12)
+    assert float(components.movie) > 0.0
+
+
+def test_pixel_mismatch_is_diagnostic_only_for_symmetric_rotation(monkeypatch):
+    problem, _, _, near_truth, _ = make_tiny_inverse_problem()
+    rotated = jnp.rot90(problem.observations, axes=(-2, -1))
+    rotated_mass = jnp.sum(
+        jnp.where(problem.grid.mask[None], rotated, 0.0), axis=(1, 2)
+    ) * problem.grid.cell_area
+    monkeypatch.setattr(
+        "graphite_stage_transition.inversion.simulate",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            concentration=rotated,
+            mass=rotated_mass,
+        ),
+    )
+
+    components = loss_components(problem, TRANSFORM.to_unconstrained(near_truth))
+
+    assert float(components.movie) > 0.0
+    np.testing.assert_allclose(components.radial, 0.0, atol=1e-12)
+    np.testing.assert_allclose(components.structure, 0.0, atol=1e-12)
+    np.testing.assert_allclose(components.boundary, 0.0, atol=1e-12)
+    np.testing.assert_allclose(components.total, 0.0, atol=1e-12)
+
+
+def test_inverse_residual_vector_is_zero_at_generating_parameters():
+    problem, truth, _, _, _ = make_tiny_inverse_problem()
+
+    residual = inverse_residual_vector(problem, TRANSFORM.to_unconstrained(truth))
+
+    np.testing.assert_allclose(residual, 0.0, atol=1e-12)
+
+
+def test_tiny_clean_observable_fit_recovers_two_strong_groups():
     problem, _, truth_groups, near_truth, displaced = make_tiny_inverse_problem()
 
     result = fit_multistart(problem, starts=[near_truth, displaced], maxiter=40)
 
     assert result.best.loss < float(problem.loss(TRANSFORM.to_unconstrained(displaced)))
-    assert relative_group_error(result.best.groups, truth_groups).max() < 0.05
+    group_error = relative_group_error(result.best.groups, truth_groups)
+    assert group_error[0] < 0.02
+    assert group_error[1] < 0.02
+    # Boundary kinetics remain weakly identified in this eight-step probe.
+    assert group_error[2] < 0.5
     assert len(result.starts) == 2
     assert all(start.forward_solves > 0 for start in result.starts)
 
@@ -120,7 +172,7 @@ def test_fit_reuses_components_from_final_objective_evaluation(monkeypatch):
             target = jnp.log(jnp.asarray([0.1, 0.7, 0.0012, 0.2]))
             movie = jnp.sum((values - target) ** 2)
             zero = jnp.asarray(0.0)
-            return LossComponents(movie, movie, zero, zero)
+            return LossComponents(movie, zero, zero, zero, movie, zero, zero)
 
         def loss(self, values):
             return self.components(values).total

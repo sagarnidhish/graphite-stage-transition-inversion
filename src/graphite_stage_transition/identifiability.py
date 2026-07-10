@@ -10,8 +10,7 @@ import jax.numpy as jnp
 import numpy as np
 from scipy.optimize import minimize
 
-from .inversion import InverseProblem
-from .solver import simulate
+from .inversion import InverseProblem, inverse_residual_vector
 
 
 @dataclass(frozen=True)
@@ -108,19 +107,7 @@ def parameter_correlation(jacobian, relative_cutoff: float = 1e-10) -> np.ndarra
 
 
 def _residual_vector(problem: InverseProblem, unconstrained, max_residuals: int):
-    parameters = problem.transform.from_unconstrained(unconstrained)
-    prediction = simulate(
-        problem.grid,
-        problem.protocol,
-        parameters,
-        problem.solver,
-        initial_concentration=problem.initial_concentration,
-        seed=problem.solver.seed,
-    ).concentration
-    residual = (
-        prediction[:, problem.grid.mask] - problem.observations[:, problem.grid.mask]
-    ).reshape(-1)
-    residual = residual / (problem.transform.stage1 - problem.transform.stage2)
+    residual = inverse_residual_vector(problem, unconstrained)
     if residual.shape[0] <= max_residuals:
         return residual
     indices = jnp.asarray(
@@ -134,7 +121,7 @@ def residual_jacobian(
     optimum,
     max_residuals: int = 2048,
 ) -> np.ndarray:
-    """Differentiate a deterministic reduced spatial residual vector."""
+    """Differentiate the deterministic weighted morphology residual vector."""
 
     if max_residuals < 4:
         raise ValueError("max_residuals must be at least four")

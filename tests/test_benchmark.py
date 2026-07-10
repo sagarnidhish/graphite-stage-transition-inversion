@@ -6,9 +6,11 @@ import re
 import tarfile
 
 from graphite_stage_transition.benchmark import (
+    BenchmarkExecution,
     aggregate_task_status,
     build_task_table,
     resume_benchmark,
+    run_task,
     write_success_marker,
 )
 from graphite_stage_transition.gpu_payload import (
@@ -64,6 +66,52 @@ def test_resume_skips_only_verified_success(tmp_path: Path):
     assert status["pending"] == len(table) - 1
 
 
+def test_resume_rejects_marker_from_different_execution(tmp_path: Path):
+    task = build_task_table(_smoke_manifest(), methods=("chr",))[0]
+    original = BenchmarkExecution(
+        fingerprint_sha256="a" * 64,
+        base_seed=20260710,
+        starts=2,
+        maxiter=4,
+        claim_eligible=False,
+    )
+    write_success_marker(tmp_path, task, execution=original)
+
+    assert resume_benchmark([task], tmp_path, execution=original) == []
+    for changed in (
+        BenchmarkExecution("b" * 64, 20260710, 2, 4, False),
+        BenchmarkExecution("a" * 64, 20260711, 2, 4, False),
+        BenchmarkExecution("a" * 64, 20260710, 3, 4, False),
+        BenchmarkExecution("a" * 64, 20260710, 2, 5, False),
+        BenchmarkExecution("a" * 64, 20260710, 2, 4, True),
+    ):
+        assert resume_benchmark([task], tmp_path, execution=changed) == [task]
+
+
+def test_task_result_stamps_claim_eligibility(tmp_path, monkeypatch):
+    task = build_task_table(_smoke_manifest(), methods=("chr",))[0]
+    execution = BenchmarkExecution("a" * 64, 20260710, 1, 1, False)
+    monkeypatch.setattr(
+        "graphite_stage_transition.benchmark._execute_task",
+        lambda *_args, **_kwargs: {"method": "chr", "best": {"loss": 0.0}},
+    )
+
+    succeeded = run_task(
+        task,
+        tmp_path / "manifest.json",
+        tmp_path,
+        starts=1,
+        maxiter=1,
+        execution=execution,
+    )
+
+    result = json.loads(
+        (tmp_path / "tasks" / task.task_id / "result.json").read_text(encoding="ascii")
+    )
+    assert succeeded
+    assert result["claim_eligible"] is False
+
+
 def test_gpu_payload_embeds_sources_manifest_and_selected_data(tmp_path: Path):
     project = tmp_path / "project"
     (project / "src" / "graphite_stage_transition").mkdir(parents=True)
@@ -87,6 +135,7 @@ def test_gpu_payload_embeds_sources_manifest_and_selected_data(tmp_path: Path):
 
     text = output.read_text()
     assert "ARCHIVE_B64" in text
+    assert "stable_task_seed(20260710, task.task_id)" in text
     assert "kgpu_graphite_results.tar.gz" in text
     assert "graphite_stage_transition" not in output.name
     encoded = re.search(r'ARCHIVE_B64 = "([A-Za-z0-9+/=]+)"', text).group(1)
@@ -115,4 +164,5 @@ def test_public_gpu_bootstrap_contains_only_public_urls_and_hashes(tmp_path: Pat
     assert "https://github.com/example/project/releases/download/v1/source.tar.gz" in text
     assert "a" * 64 in text
     assert "development" in text
+    assert "stable_task_seed(20260710, task.task_id)" in text
     assert "kgpu_graphite_results.tar.gz" in text

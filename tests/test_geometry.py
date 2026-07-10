@@ -1,7 +1,29 @@
 import numpy as np
+import jax.numpy as jnp
 
 from graphite_stage_transition.config import GridConfig
-from graphite_stage_transition.geometry import make_circle_grid, radial_bin_indices
+from graphite_stage_transition.geometry import (
+    _boundary_face_count,
+    make_circle_grid,
+    radial_bin_indices,
+)
+
+
+def test_boundary_face_count_is_integer_exposed_face_count():
+    mask = jnp.ones((3, 3), dtype=bool)
+    expected = np.array([[2, 1, 2], [1, 0, 1], [2, 1, 2]])
+
+    np.testing.assert_array_equal(np.asarray(_boundary_face_count(mask)), expected)
+
+
+def test_circle_boundary_is_strict_subset_of_active_cells():
+    grid = make_circle_grid(GridConfig(nx=48, ny=48, length=1.0, radius=0.4))
+    face_count = np.asarray(grid.boundary_weight / grid.dx)
+
+    assert np.count_nonzero(face_count) == 108
+    assert face_count.sum() == 152
+    assert set(np.unique(face_count)) == {0.0, 1.0, 2.0}
+    assert np.count_nonzero(face_count) < grid.active_count
 
 
 def test_circle_grid_is_centered_and_has_boundary():
@@ -25,4 +47,3 @@ def test_radial_bins_cover_every_active_cell_once():
     assert np.all(indices[active] >= 0)
     assert np.all(indices[active] < 12)
     assert np.all(indices[~active] == -1)
-

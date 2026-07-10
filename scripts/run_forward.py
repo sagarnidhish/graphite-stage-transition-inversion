@@ -14,16 +14,18 @@ from graphite_stage_transition.config import load_config
 from graphite_stage_transition.geometry import make_circle_grid
 from graphite_stage_transition.protocols import build_protocol
 from graphite_stage_transition.solver import CHRParameters, simulate
+from graphite_stage_transition.verification import verify_full_cycle_transition
 
 
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--require-full-cycle", action="store_true")
     return parser.parse_args()
 
 
-def main() -> None:
+def main() -> int:
     args = parse_args()
     config = load_config(args.config)
     grid = make_circle_grid(config.grid)
@@ -59,10 +61,19 @@ def main() -> None:
         "max_cg_residual": float(np.max(np.asarray(result.cg_residual))),
         "finite": bool(np.all(np.isfinite(np.asarray(result.concentration)))),
     }
+    if args.require_full_cycle:
+        full_cycle = verify_full_cycle_transition(
+            result.concentration,
+            grid.mask,
+            config.model.stage2,
+            config.model.stage1,
+        )
+        summary["full_cycle"] = asdict(full_cycle)
     (args.out / "summary.json").write_text(
         json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
+    return 0 if not args.require_full_cycle or full_cycle.passed else 1
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

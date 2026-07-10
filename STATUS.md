@@ -16,9 +16,24 @@ locked-test evaluation have not run.
 Multistart scaling is now explicitly stopped by a failed backend-reproducibility
 gate. See `docs/backend_reproducibility_report.md`.
 
+The synthetic cohort and all boundary-kinetics/Damkohler evidence are also
+invalidated by a confirmed geometry bug: Boolean neighbor masks were combined
+with logical addition, marking all 1,160 active cells as reactive instead of
+only 108 boundary cells. Repair requirements are frozen in
+`docs/superpowers/specs/2026-07-10-backend-stable-canonical-pipeline-design.md`.
+
 ## Verified Evidence
 
 - Test suite: `53 passed` with `PYTHONNOUSERSITE=1 .conda/bin/pytest -q`.
+- Boundary bug reproduction on the canonical grid: 1,160 nonzero reaction
+  weights, weight sum `72.5`, and a single active weight `3*dx`; correct integer
+  face counting must instead give 108 boundary cells and 152 exposed faces.
+
+## Invalidated Historical Evidence
+
+The results below remain recorded for provenance, but they were generated with
+a volumetric source and cannot support the intended boundary-driven CHR model:
+
 - Canonical mass relative error: `7.1e-11`.
 - Deterministic replay: exact equality.
 - Zero-current relaxation: no detected energy increase.
@@ -60,7 +75,8 @@ gate. See `docs/backend_reproducibility_report.md`.
 
 ## Active Limitation
 
-The direct pixelwise inversion is both too expensive and backend sensitive.
+The intended boundary-driven model is not yet implemented correctly. In
+addition, the direct pixelwise inversion is too expensive and backend sensitive.
 Roundoff/reduction differences during spinodal growth are the leading mechanism
 hypothesis, but field-level divergence localization is still required. The
 current CPU/P100/A100 mismatch invalidates cross-backend parameter-recovery and

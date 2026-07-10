@@ -31,5 +31,5 @@ seed = 7
 [inversion]
 starts = 3
 max_iterations = 80
-mass_penalty = 1.0
-bound_penalty = 1e-8
+mass_penalty = 0.0
+bound_penalty = 1e-4

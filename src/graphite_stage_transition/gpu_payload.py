@@ -82,13 +82,14 @@ sys.path.insert(0, str(ROOT / "src"))
 os.chdir(ROOT)
 import jax
 from graphite_stage_transition.benchmark import build_task_table, run_task, aggregate_task_status
+from graphite_stage_transition.execution import stable_task_seed
 manifest_path = ROOT / "benchmark" / "manifest.json"
 manifest = json.loads(manifest_path.read_text())
 tasks = build_task_table(manifest, methods=("chr",))
 output = ROOT / "results"
 for index, task in enumerate(tasks, 1):
     print(f"TASK {{index}}/{{len(tasks)}} {{task.task_id}}", flush=True)
-    run_task(task, manifest_path, output, starts={int(starts)}, maxiter={int(maxiter)}, seed=20260710 + index)
+    run_task(task, manifest_path, output, starts={int(starts)}, maxiter={int(maxiter)}, seed=stable_task_seed(20260710, task.task_id))
 status = aggregate_task_status(tasks, output)
 (output / "run_metadata.json").write_text(json.dumps({{"device": str(jax.devices()), "archive_sha256": ARCHIVE_SHA256, "starts": {int(starts)}, "maxiter": {int(maxiter)}}}, indent=2, sort_keys=True) + "\\n")
 result_tar = pathlib.Path("/kaggle/working/kgpu_graphite_results.tar.gz")
@@ -174,6 +175,7 @@ from graphite_stage_transition.benchmark import (
     build_task_table,
     run_task,
 )
+from graphite_stage_transition.execution import stable_task_seed
 
 manifest_path = DATA / "manifest.json"
 manifest = json.loads(manifest_path.read_text())
@@ -202,7 +204,7 @@ for index, task in enumerate(tasks, 1):
         output,
         starts={int(starts)},
         maxiter={int(maxiter)},
-        seed=20260710 + task.record_index,
+        seed=stable_task_seed(20260710, task.task_id),
     )
 status = aggregate_task_status(tasks, output)
 metadata = {{

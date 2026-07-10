@@ -1,3 +1,4 @@
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -105,3 +106,100 @@ def test_iterative_solve_projects_the_exact_mass_mode():
     expected = float(protocol.current.sum() * solver.dt)
     measured = float(result.mass[-1] - result.mass[0])
     assert measured == pytest.approx(expected, abs=2e-13)
+
+
+def test_sparse_and_every_step_saves_have_identical_trajectories_and_diagnostics():
+    grid, parameters, solver, initial = _small_system(initial=0.71)
+    sparse_protocol = make_constant_protocol(
+        current=0.008, steps=10, dt=solver.dt, save_every=3
+    )
+    dense_protocol = make_constant_protocol(
+        current=0.008, steps=10, dt=solver.dt, save_every=1
+    )
+
+    sparse = simulate(
+        grid, sparse_protocol, parameters, solver, initial_concentration=initial, seed=4
+    )
+    dense = simulate(
+        grid, dense_protocol, parameters, solver, initial_concentration=initial, seed=4
+    )
+    save = np.asarray(sparse_protocol.save_indices)
+
+    np.testing.assert_array_equal(sparse.concentration, dense.concentration[save])
+    for field in (
+        "mass",
+        "free_energy",
+        "overpotential",
+        "summed_current",
+        "cg_residual",
+    ):
+        np.testing.assert_allclose(
+            np.asarray(getattr(sparse, field)),
+            np.asarray(getattr(dense, field))[save],
+            rtol=0.0,
+            atol=1e-12,
+        )
+
+
+def test_simulation_scan_collects_only_carry_outputs():
+    grid, parameters, solver, initial = _small_system(initial=0.71)
+    protocol = make_constant_protocol(
+        current=0.008, steps=7, dt=solver.dt, save_every=3
+    )
+
+    traced = jax.make_jaxpr(
+        lambda mobility: simulate(
+            grid,
+            protocol,
+            parameters._replace(mobility=mobility),
+            solver,
+            initial_concentration=initial,
+            seed=4,
+        ).concentration
+    )(jnp.asarray(parameters.mobility, dtype=jnp.float64))
+    scan_equations = [
+        equation for equation in traced.jaxpr.eqns if equation.primitive.name == "scan"
+    ]
+
+    assert len(scan_equations) == 1
+    scan = scan_equations[0]
+    assert scan.params["num_carry"] == len(scan.outvars)
+
+
+def test_sparse_saves_preserve_objective_gradient():
+    grid, parameters, solver, initial = _small_system(initial=0.71)
+    sparse_protocol = make_constant_protocol(
+        current=0.008, steps=6, dt=solver.dt, save_every=2
+    )
+    dense_protocol = make_constant_protocol(
+        current=0.008, steps=6, dt=solver.dt, save_every=1
+    )
+    sparse_indices = sparse_protocol.save_indices
+    active_mask = grid.mask.astype(jnp.float64)
+
+    def objective(mobility, protocol, output_indices=None):
+        result = simulate(
+            grid,
+            protocol,
+            parameters._replace(mobility=mobility),
+            solver,
+            initial_concentration=initial,
+            seed=4,
+        )
+        movie = result.concentration
+        if output_indices is not None:
+            movie = movie[output_indices]
+        return jnp.sum(movie**2 * active_mask) / grid.active_count
+
+    mobility = jnp.asarray(parameters.mobility, dtype=jnp.float64)
+    sparse_value, sparse_gradient = jax.value_and_grad(objective)(
+        mobility, sparse_protocol
+    )
+    dense_value, dense_gradient = jax.value_and_grad(objective)(
+        mobility, dense_protocol, sparse_indices
+    )
+
+    np.testing.assert_allclose(sparse_value, dense_value, rtol=1e-10, atol=1e-12)
+    np.testing.assert_allclose(
+        sparse_gradient, dense_gradient, rtol=1e-10, atol=1e-12
+    )
